@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { configSchema } from "../src/config/schema.js";
+import { Dispatcher } from "../src/core/dispatcher.js";
+import { DEFAULT_PROMPT } from "../src/core/template.js";
 import { Watcher } from "../src/core/watcher.js";
-import { harness, ticket } from "./fakes.js";
+import { harness, noExec, ticket } from "./fakes.js";
 
 function watcher(h: ReturnType<typeof harness>) {
   return new Watcher({ config: h.config, store: h.store, providers: h.providers, dispatcher: h.dispatcher, log: h.log });
@@ -171,6 +174,28 @@ describe("Watcher", () => {
       await w.start();
       await vi.advanceTimersByTimeAsync(20_000);
       expect(Object.values(states(h))).toEqual(["running"]);
+      await w.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("applies a reloaded config: new criteria, limits, and intervals take effect at once", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness({ firstRun: "dispatch", maxConcurrent: 1, pollIntervalSeconds: 600 });
+      h.tickets.tickets.push(ticket(1), ticket(2, { labels: ["other"] }), ticket(3));
+      const w = watcher(h);
+      await w.start();
+      expect(states(h)).toEqual({ "PQ-1": "running" });
+
+      const config = configSchema.parse({ ...h.config, maxConcurrent: 3, pollIntervalSeconds: 30, tickets: { ...h.config.tickets, labels: ["other"] } });
+      const dispatcher = new Dispatcher({ config, store: h.store, providers: h.providers, log: h.log, exec: noExec, promptTemplate: DEFAULT_PROMPT, startupSettleMs: 0 });
+      await w.reload({ config, providers: h.providers, dispatcher });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(states(h)).toEqual({ "PQ-1": "running", "PQ-2": "running" });
+      expect(w.statusLine()).toContain("2/3 slots in use");
+      expect(w.statusLine()).toMatch(/next poll in (29|30)s/);
       await w.stop();
     } finally {
       vi.useRealTimers();

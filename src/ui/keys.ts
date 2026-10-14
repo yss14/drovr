@@ -5,10 +5,11 @@ export interface KeyHandlers {
   togglePause(): void;
   pollNow(): void;
   status(): void;
+  reload(): void;
   quit(): void;
 }
 
-export const KEY_HELP = `${pc.bold("p")} pause/resume · ${pc.bold("r")} poll now · ${pc.bold("s")} status · ${pc.bold("q")} quit`;
+export const KEY_HELP = `${pc.bold("space")} pause/resume · ${pc.bold("p")} poll now · ${pc.bold("r")} reload config · ${pc.bold("s")} status · ${pc.bold("q")} quit`;
 
 /** Single-key shortcuts on an interactive terminal. Returns a cleanup function. */
 export function bindKeys(handlers: KeyHandlers, input: NodeJS.ReadStream = process.stdin): () => void {
@@ -20,11 +21,12 @@ export function bindKeys(handlers: KeyHandlers, input: NodeJS.ReadStream = proce
     if (!key) return;
     if (key.ctrl && key.name === "c") return handlers.quit();
     switch (key.name) {
-      case "p":
       case "space":
         return handlers.togglePause();
-      case "r":
+      case "p":
         return handlers.pollNow();
+      case "r":
+        return handlers.reload();
       case "s":
         return handlers.status();
       case "q":

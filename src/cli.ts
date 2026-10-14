@@ -127,11 +127,51 @@ function openStore(config: Config, opts: { readonly?: boolean } = {}): Store {
 async function setup(opts: SharedOptions & { dryRun?: boolean }) {
   const log = createConsoleLogger({ verbose: opts.verbose });
   const loaded = resolveConfig(opts);
-  const providers = await resolveProviders(loaded.config, { exec, log });
   // A dry run never writes state: it reads the database if present, else uses an empty in-memory one.
   const store = openStore(loaded.config, { readonly: Boolean(opts.dryRun || loaded.config.dryRun) });
+  return { log, store, ...(await buildRuntime(loaded, store, log)) };
+}
+
+/** Providers and dispatcher for a resolved config; rebuilt around the same store on a config reload. */
+async function buildRuntime(loaded: LoadedConfig, store: Store, log: Logger) {
+  const providers = await resolveProviders(loaded.config, { exec, log });
   const dispatcher = new Dispatcher({ config: loaded.config, store, providers, log, exec, promptTemplate: loadPromptTemplate(loaded.config) });
-  return { log, loaded, config: loaded.config, providers, store, dispatcher };
+  return { loaded, config: loaded.config, providers, dispatcher };
+}
+
+type Runtime = Awaited<ReturnType<typeof buildRuntime>>;
+
+/**
+ * Re-reads the config file (flags still win) and checks it before `apply` swaps it in. On any error the
+ * current config stays. Settings that pick the run mode or the state it is kept in need a restart.
+ */
+function configReloader(opts: SharedOptions & { dryRun?: boolean }, current: () => Config, store: Store, log: Logger, apply: (next: Runtime) => Promise<void> | void) {
+  let reloading = false;
+  return async () => {
+    if (reloading) return log.log("config", "already reloading");
+    reloading = true;
+    log.log("config", "reloading…");
+    try {
+      const next = await buildRuntime(resolveConfig(opts), store, log);
+      const dryRun = (c: Config) => Boolean(opts.dryRun || c.dryRun);
+      const fixed = [
+        next.config.workflow !== current().workflow ? "workflow" : undefined,
+        next.config.database !== current().database ? "database" : undefined,
+        dryRun(next.config) !== dryRun(current()) ? "dryRun" : undefined,
+      ].filter(Boolean);
+      if (fixed.length > 0) throw new Error(`${fixed.join(", ")} cannot change while running; restart drovr to apply`);
+      if (!reportPreflight(log, await runPreflight(next.config, next.providers, { requireLaunch: !dryRun(next.config) }))) {
+        throw new Error("some checks failed");
+      }
+      await apply(next);
+      logConfigSummary(log, next.loaded);
+      log.log("config", "reloaded");
+    } catch (error) {
+      log.log("error", `config not reloaded, keeping the current one: ${(error as Error).message}`);
+    } finally {
+      reloading = false;
+    }
+  };
 }
 
 // ── Commands ───────────────────────────────────────────────────────────────
@@ -158,18 +198,39 @@ withRunOptions(program.command("run", { isDefault: true }).description("watch fo
     }
 
     if (dryRun) {
-      const pollOnce = () => dryRunPoll({ config, providers, store, dispatcher, log }).catch((error: Error) => log.log("error", error.message));
+      let runtime: Runtime = { loaded, config, providers, dispatcher };
+      const pollOnce = () => dryRunPoll({ ...runtime, store, log }).catch((error: Error) => log.log("error", error.message));
       await pollOnce();
       if (opts.once || !process.stdin.isTTY) return store.close();
-      log.log("drovr", `dry run repeats every ${config.pollIntervalSeconds}s · ${pc.bold("r")} poll now · ${pc.bold("q")} quit`);
-      const timer = setInterval(pollOnce, config.pollIntervalSeconds * 1000);
+      const every = () => `dry run repeats every ${runtime.config.pollIntervalSeconds}s`;
+      log.log("drovr", `${every()} · ${pc.bold("p")} poll now · ${pc.bold("r")} reload config · ${pc.bold("q")} quit`);
+      let timer = setInterval(pollOnce, config.pollIntervalSeconds * 1000);
+      const reload = configReloader(opts, () => runtime.config, store, log, (next) => {
+        runtime = next;
+        clearInterval(timer);
+        timer = setInterval(pollOnce, next.config.pollIntervalSeconds * 1000);
+        log.log("drovr", every());
+        void pollOnce();
+      });
       await new Promise<void>((resolveQuit) => {
-        const unbind = bindKeys({ togglePause() {}, status() {}, pollNow: () => void pollOnce(), quit: () => (clearInterval(timer), unbind(), resolveQuit()) });
+        const unbind = bindKeys({
+          togglePause() {},
+          status() {},
+          pollNow: () => void pollOnce(),
+          reload: () => void reload(),
+          quit: () => (clearInterval(timer), unbind(), resolveQuit()),
+        });
       });
       return store.close();
     }
 
     const watcher = new Watcher({ config, store, providers, dispatcher, log });
+    let current = config;
+    const reload = configReloader(opts, () => current, store, log, async (next) => {
+      if (watcher.phase === "launching") log.log("config", "applies once the launch in progress finishes");
+      await watcher.reload(next);
+      current = next.config;
+    });
     let unbind = () => {};
     const quit = async () => {
       log.log("drovr", "stopping…");
@@ -187,6 +248,7 @@ withRunOptions(program.command("run", { isDefault: true }).description("watch fo
             watcher.pollNow();
           },
           status: () => printStatus(log, watcher.statusLine(), watcher.activeRecords()),
+          reload: () => void reload(),
           quit: () => void quit(),
         });
         log.log("drovr", `keys: ${KEY_HELP}`);
@@ -340,7 +402,7 @@ withConfigOptions(program.command("retry <ticket>").description("resume a failed
       ...(opts.resendPrompt ? { promptIntentAt: null, promptedAt: null } : {}),
     });
     store.addEvent(config.workflow, record, "retry", `Retry requested from ${record.state}${opts.resendPrompt ? " (resend prompt)" : ""}`);
-    console.log(`${record.identifier}: ${record.state} → retry. A running watcher picks it up on its next poll (press r to poll now) once a slot is free.`);
+    console.log(`${record.identifier}: ${record.state} → retry. A running watcher picks it up on its next poll (press p to poll now) once a slot is free.`);
     store.close();
   });
 

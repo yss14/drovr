@@ -34,7 +34,7 @@ export class Watcher {
   readonly done: Promise<void>;
   private resolveDone!: () => void;
 
-  constructor(private readonly deps: WatcherDeps) {
+  constructor(private deps: WatcherDeps) {
     this.done = new Promise((resolve) => (this.resolveDone = resolve));
   }
 
@@ -66,9 +66,7 @@ export class Watcher {
       return;
     }
     this.schedulePoll();
-    this.monitorTimer = setInterval(() => {
-      if (!this.busy) void this.serial(() => this.monitor());
-    }, config.monitorIntervalSeconds * 1000);
+    this.startMonitor();
   }
 
   async stop(): Promise<void> {
@@ -110,6 +108,19 @@ export class Watcher {
     void this.serial(() => this.poll()).then(() => this.schedulePoll());
   }
 
+  /**
+   * Swaps in a reloaded configuration between operations, so a launch in progress finishes with the
+   * one it started with. The poll and monitor loops restart on the new intervals and a poll runs at once.
+   */
+  async reload(next: Pick<WatcherDeps, "config" | "providers" | "dispatcher">): Promise<void> {
+    await this.serial(async () => {
+      this.deps = { ...this.deps, ...next };
+    });
+    if (this.stopping || !this.monitorTimer) return;
+    this.startMonitor();
+    this.pollNow();
+  }
+
   /** One-line summary for the status shortcut. */
   statusLine(): string {
     const active = this.deps.store.countActive(this.workflow);
@@ -138,6 +149,13 @@ export class Watcher {
     this.pollTimer = setTimeout(() => {
       void this.serial(() => this.poll()).then(() => this.schedulePoll());
     }, delay);
+  }
+
+  private startMonitor(): void {
+    clearInterval(this.monitorTimer);
+    this.monitorTimer = setInterval(() => {
+      if (!this.busy) void this.serial(() => this.monitor());
+    }, this.deps.config.monitorIntervalSeconds * 1000);
   }
 
   /** Runs operations one at a time so polls, launches, and monitoring never interleave. */

@@ -32,7 +32,9 @@ drovr run --dry-run --once     # what would launch, without doing anything
 drovr run                      # watch
 ```
 
-While `drovr run` is running in a terminal: **p** (or space) pause/resume · **r** poll now · **s** status · **q** / Ctrl-C quit. Pausing stops polling and launching. A launch already in progress finishes first.
+While `drovr run` is running in a terminal: **space** pause/resume · **p** poll now · **r** reload config · **s** status · **q** / Ctrl-C quit. Pausing stops polling and launching. A launch already in progress finishes first.
+
+**r** re-reads the config file and prompt template (command-line flags still win), runs the checks again, and swaps in the new config, then polls right away. A launch already in progress finishes with the old config first. If the file is invalid or a check fails, drovr keeps the current config and logs why. `workflow`, `database`, and `dryRun` cannot change while running, and plugin modules are not re-imported, so changes to those need a restart.
 
 ## Configuration
 
