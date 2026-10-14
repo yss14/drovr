@@ -1,0 +1,45 @@
+{
+  "workflow": "pq-agent-ready",
+  "pollIntervalSeconds": 60,
+  "maxConcurrent": 1,
+  "firstRun": "dispatch",
+  "tickets": {
+    "provider": "linear",
+    "team": "PQ",
+    "labels": [
+      "agent-ready"
+    ],
+    "excludeLabels": [],
+    "states": [
+      "Todo"
+    ],
+    "assignee": "any"
+  },
+  "completion": {
+    "stateTypes": [
+      "completed",
+      "canceled"
+    ],
+    "states": [
+      "Review"
+    ],
+    "whenWorkspaceClosed": true
+  },
+  "repositories": [
+    {
+      "path": "~/Dev/pricenow/vsc-microservices",
+      "vcs": "auto",
+      "worktreePath": "{repo}/.worktrees/{branchSlug}",
+      "setup": []
+    }
+  ],
+  "terminal": {
+    "provider": "herdr",
+    "session": "pricenow",
+    "focus": false
+  },
+  "agent": {
+    "provider": "codex",
+    "args": []
+  }
+}

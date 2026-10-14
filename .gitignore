@@ -147,3 +147,9 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# drovr
+dist
+drovr.config.json
+*.db
+*.db-*
