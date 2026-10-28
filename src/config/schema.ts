@@ -102,6 +102,11 @@ export const configSchema = z.object({
       provider: nonEmpty.default("codex"),
       /** Extra arguments passed to the agent executable. */
       args: z.array(z.string()).default([]),
+      /**
+       * Environment variables set in the agent's Herdr workspace, e.g. { "CLAUDE_CONFIG_DIR": "~/.claude-team" }.
+       * A leading ~ expands to the home directory. DROVR_TICKET and DROVR_WORKFLOW cannot be overridden.
+       */
+      env: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "must be a valid environment variable name"), z.string()).default({}),
       /** Agent name template (must be unique within the Herdr session). */
       name: nonEmpty.default("{identifierLower}-{titleSlugShort}"),
       /** How long to wait for the agent to become interactive before flagging it. */

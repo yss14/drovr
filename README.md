@@ -87,6 +87,7 @@ Objects merge key by key. Arrays (labels, states, repositories, agent args) are 
 | `terminal.workspaceLabel` | `"{identifier} {titleShort}"` | | Workspace label template, e.g. "PQ-7859 Show price and CTA in the standalone mobile…". |
 | `agent.provider` | `"codex"` | `--agent` | `codex`, `claude`, or a plugin. |
 | `agent.args` | `[]` | `--agent-arg` (repeatable) | Extra arguments for the agent executable. |
+| `agent.env` | `{}` | | Environment variables set in the agent's Herdr workspace, e.g. `{ "CLAUDE_CONFIG_DIR": "~/.claude-team" }` to run Claude Code against another account's config. A leading `~` expands. `DROVR_TICKET` and `DROVR_WORKFLOW` always win. |
 | `agent.name` | `"{identifierLower}-{titleSlugShort}"` | | Herdr agent name template, e.g. `pq-7859-show-price-and-cta-in`. Must be unique in the session. |
 | `agent.startTimeoutSeconds` | `90` | | How long to wait for the agent to become interactive. |
 | `prompt.delivery` | `"file"` | `--prompt-delivery` | `file` or `inline`. See [Prompt delivery](#prompt-delivery). |

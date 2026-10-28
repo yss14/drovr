@@ -266,7 +266,7 @@ export class Dispatcher {
       cwd: record.worktreePath!,
       label,
       focus: config.terminal.focus,
-      env: { DROVR_TICKET: record.identifier, DROVR_WORKFLOW: this.workflow },
+      env: { ...config.agent.env, DROVR_TICKET: record.identifier, DROVR_WORKFLOW: this.workflow },
     });
     log.detail(`created Herdr workspace ${created.workspaceId} "${label}" (pane ${created.paneId}${config.terminal.focus ? "" : ", not focused"})`);
     this.event(record, "workspace", `Workspace ${created.workspaceId}, pane ${created.paneId}`);

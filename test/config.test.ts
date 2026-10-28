@@ -1,5 +1,5 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigError, loadConfig, mergeConfig } from "../src/config/load.js";
@@ -39,6 +39,18 @@ describe("config", () => {
   it("expands ~ in the default database path", () => {
     const { file } = configFile({});
     expect(loadConfig({ file }).config.database).toMatch(/^\/.*\.local\/state\/drovr\/drovr\.db$/);
+  });
+
+  it("expands ~ in agent env values only", () => {
+    const { file } = configFile({ agent: { env: { CLAUDE_CONFIG_DIR: "~/.claude-team", MODE: "a~b" } } });
+    const { env } = loadConfig({ file }).config.agent;
+    expect(env.CLAUDE_CONFIG_DIR).toBe(join(homedir(), ".claude-team"));
+    expect(env.MODE).toBe("a~b");
+  });
+
+  it("rejects invalid agent env names", () => {
+    const { file } = configFile({ agent: { env: { "BAD-NAME": "x" } } });
+    expect(() => loadConfig({ file })).toThrow(/agent\.env/);
   });
 
   it("reports invalid values with their path", () => {

@@ -97,6 +97,10 @@ function resolvePaths(input: Plain, base: string): Plain {
       isPlain(repo) && typeof repo.path === "string" ? { ...repo, path: resolveFrom(base, repo.path) } : repo,
     );
   }
+  if (isPlain(out.agent) && isPlain(out.agent.env)) {
+    const env = Object.entries(out.agent.env).map(([key, value]) => [key, typeof value === "string" ? expandHome(value) : value]);
+    out.agent = { ...out.agent, env: Object.fromEntries(env) };
+  }
   if (isPlain(out.prompt) && typeof out.prompt.templateFile === "string") {
     out.prompt = { ...out.prompt, templateFile: resolveFrom(base, out.prompt.templateFile) };
   }

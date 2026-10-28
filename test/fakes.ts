@@ -104,6 +104,7 @@ export class FakeVcs implements VcsProvider {
 interface FakeWorkspace {
   id: string;
   label: string;
+  env: Record<string, string>;
   pane: PaneState;
 }
 
@@ -133,11 +134,11 @@ export class FakeTerminal implements TerminalProvider {
   supportedAgentKinds() {
     return ["codex", "claude"];
   }
-  async createWorkspace(opts: { cwd: string; label: string }) {
+  async createWorkspace(opts: { cwd: string; label: string; env: Record<string, string> }) {
     this.calls.push("createWorkspace");
     const id = `w${++this.seq}`;
     const pane: PaneState = { paneId: `${id}:p1`, workspaceId: id, cwd: opts.cwd, activity: "unknown" };
-    this.workspaces.push({ id, label: opts.label, pane });
+    this.workspaces.push({ id, label: opts.label, env: opts.env, pane });
     if (this.loseNextCreateResponse) {
       this.loseNextCreateResponse = false;
       throw new Error("socket closed");

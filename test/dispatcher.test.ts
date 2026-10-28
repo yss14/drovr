@@ -28,6 +28,12 @@ describe("Dispatcher.launch", () => {
     expect(h.terminal.prompts[0]!.text).toContain("Do thing 1");
   });
 
+  it("sets the configured agent env in the workspace, keeping drovr's own variables", async () => {
+    const h = harness({ agent: { env: { CLAUDE_CONFIG_DIR: "/home/me/.claude-team", DROVR_TICKET: "nope" } } });
+    await h.dispatcher.launch(claim(h, 1));
+    expect(h.terminal.workspaces[0]!.env).toEqual({ CLAUDE_CONFIG_DIR: "/home/me/.claude-team", DROVR_TICKET: "PQ-1", DROVR_WORKFLOW: h.config.workflow });
+  });
+
   it("moves the ticket to In Progress once the agent has acknowledged it", async () => {
     const h = harness();
     const result = await h.dispatcher.launch(claim(h, 1));
