@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import type { Config, RepositoryConfig } from "../config/schema.js";
 import { claudeSpec, codexSpec, createCliAgent } from "./builtin/agents.js";
 import { createGitProvider } from "./builtin/git.js";
+import { createGithubProvider } from "./builtin/github.js";
 import { createHerdrProvider } from "./builtin/herdr.js";
 import { createLinearProvider } from "./builtin/linear.js";
 import { createWorktrunkProvider } from "./builtin/worktrunk.js";
@@ -68,6 +69,13 @@ export function builtinRegistry(): PluginRegistry {
     create: (ctx, options) => createLinearProvider(ctx, { workspace: options.workspace as string | undefined, binary: options.binary as string | undefined }),
   });
   registry.register({
+    kind: "tickets",
+    id: "github",
+    description: "GitHub issues via the gh CLI",
+    create: (ctx, options) =>
+      createGithubProvider(ctx, { repo: options.repo as string | undefined, cwd: options.cwd as string | undefined, binary: options.binary as string | undefined }),
+  });
+  registry.register({
     kind: "terminal",
     id: "herdr",
     description: "Herdr terminal workspaces",
@@ -99,11 +107,22 @@ export function resolveVcsId(repo: RepositoryConfig): string {
   return existsSync(join(repo.path, ".config", "wt.toml")) ? "worktrunk" : "git";
 }
 
+function createTicketSource(config: Config, ctx: ProviderContext, registry: PluginRegistry): TicketSource {
+  // cwd lets a source find its project from the repository (gh resolves the GitHub repository from it).
+  return registry.get("tickets", config.tickets.provider).create(ctx, { cwd: config.repositories[0]?.path, ...config.tickets.options });
+}
+
+/** Only the ticket source, for commands that work on local records. */
+export async function resolveTicketSource(config: Config, ctx: ProviderContext, registry = builtinRegistry()): Promise<TicketSource> {
+  for (const plugin of config.plugins) await registry.load(plugin);
+  return createTicketSource(config, ctx, registry);
+}
+
 export async function resolveProviders(config: Config, ctx: ProviderContext, registry = builtinRegistry()): Promise<Providers> {
   for (const plugin of config.plugins) await registry.load(plugin);
   const vcs = new Map<string, VcsProvider>();
   return {
-    tickets: registry.get("tickets", config.tickets.provider).create(ctx, config.tickets.options),
+    tickets: createTicketSource(config, ctx, registry),
     terminal: registry.get("terminal", config.terminal.provider).create(ctx, { ...config.terminal.options, session: config.terminal.session }),
     agent: registry.get("agent", config.agent.provider).create(ctx, {}),
     vcsFor(repo) {

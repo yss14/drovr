@@ -24,6 +24,8 @@ interface LinearState {
 export interface Discovery {
   repo?: { path: string; workflow: string; baseBranch?: string; worktrunkHooks: boolean; setup?: string };
   linear: { ok: boolean; detail: string; teams: LinearTeam[] };
+  /** GitHub issues of the current repository, when gh is installed, logged in, and knows the repository. */
+  github: { ok: boolean; detail: string; repo?: string };
   sessions: { name: string; status: string }[];
   agents: string[];
 }
@@ -77,6 +79,16 @@ export async function discover(exec: Exec, cwd: string): Promise<Discovery> {
     }
   };
 
+  const github = async (): Promise<Discovery["github"]> => {
+    if (!path) return { ok: false, detail: "not in a git repository" };
+    if (!(await which(exec, "gh"))) return { ok: false, detail: "gh not found on PATH" };
+    const result = await exec("gh", ["repo", "view", "--json", "nameWithOwner,hasIssuesEnabled"], { cwd: path, timeoutMs: 30_000, env: { NO_COLOR: "1", GH_PROMPT_DISABLED: "1" } });
+    if (result.code !== 0) return { ok: false, detail: `gh cannot read this repository: ${describeFailure(result)}` };
+    const repo = JSON.parse(result.stdout) as { nameWithOwner: string; hasIssuesEnabled: boolean };
+    if (!repo.hasIssuesEnabled) return { ok: false, detail: `${repo.nameWithOwner} has issues disabled`, repo: repo.nameWithOwner };
+    return { ok: true, detail: repo.nameWithOwner, repo: repo.nameWithOwner };
+  };
+
   const sessions = async (): Promise<Discovery["sessions"]> => {
     const result = await exec("herdr", ["session", "list"], { timeoutMs: 15_000 });
     if (result.code !== 0) return [];
@@ -89,12 +101,58 @@ export async function discover(exec: Exec, cwd: string): Promise<Discovery> {
 
   const agents = async () => (await Promise.all(AGENTS.map(async (a) => ((await which(exec, a)) ? a : undefined)))).filter((a) => a !== undefined);
 
-  const [linearResult, sessionList, agentList] = await Promise.all([linear(), sessions(), agents()]);
-  return { repo, linear: linearResult, sessions: sessionList, agents: agentList };
+  const [linearResult, githubResult, sessionList, agentList] = await Promise.all([linear(), github(), sessions(), agents()]);
+  return { repo, linear: linearResult, github: githubResult, sessions: sessionList, agents: agentList };
 }
 
 const indexWhere = <T>(items: T[], pred: (item: T) => boolean) => items.flatMap((item, i) => (pred(item) ? [i] : []));
 const splitList = (value: string) => value.split(",").map((s) => s.trim()).filter(Boolean);
+
+async function askAssignee(prompter: Prompter): Promise<string> {
+  return prompter.select("Whose tickets", [
+    { value: "any", hint: "anyone's or unassigned" },
+    { value: "@me", hint: "assigned to you" },
+    { value: "none", hint: "unassigned only" },
+  ]);
+}
+
+/** Asks for the required labels, offering the tracker's labels; agent-ready is always offered and preselected. */
+async function askLabels(prompter: Prompter, labels: string[], where: string, say: (line: string) => void): Promise<string[]> {
+  // agent-ready is always offered and preselected, so the default never makes every ticket eligible.
+  const labelChoices: Choice[] = labels.map((value) => ({ value }));
+  if (!labels.some((l) => l.toLowerCase() === "agent-ready")) labelChoices.unshift({ value: "agent-ready", hint: `not in ${where} yet` });
+  const requiredLabels =
+    labels.length > 0
+      ? await prompter.multiselect("Labels a ticket must have (all of them)", labelChoices, {
+          defaults: indexWhere(labelChoices, (c) => c.value.toLowerCase() === "agent-ready"),
+          custom: true,
+        })
+      : splitList(await prompter.text("Labels a ticket must have (comma-separated)", { default: "agent-ready" }));
+  const missing = requiredLabels.filter((l) => labels.length > 0 && !labels.some((known) => known.toLowerCase() === l.toLowerCase()));
+  if (missing.length > 0) say(pc.yellow(`! ${missing.join(", ")} does not exist in ${where} yet; create it before running drovr`));
+  if (requiredLabels.length === 0) say(pc.yellow("! no required labels: every ticket in the chosen states is eligible"));
+  return requiredLabels;
+}
+
+/** Asks for the GitHub issue criteria. Issues are only open or closed, so the started "state" is a label. */
+async function askGithubTickets(exec: Exec, prompter: Prompter, repoPath: string, github: Discovery["github"], say: (line: string) => void) {
+  let labels: string[] = [];
+  try {
+    const result = await exec("gh", ["label", "list", "--json", "name", "--limit", "1000"], { cwd: repoPath, timeoutMs: 60_000, env: { NO_COLOR: "1", GH_PROMPT_DISABLED: "1" } });
+    if (result.code !== 0) throw new Error(describeFailure(result));
+    labels = (JSON.parse(result.stdout) as { name: string }[]).map((l) => l.name);
+  } catch (error) {
+    say(pc.yellow(`! cannot read the labels of ${github.repo}: ${(error as Error).message}`));
+  }
+  const requiredLabels = await askLabels(prompter, labels, github.repo ?? "GitHub", say);
+  const assignee = await askAssignee(prompter);
+  const startedChoices: Choice[] = [{ value: "none", hint: "leave the issue alone" }, ...labels.filter((l) => !requiredLabels.includes(l)).map((value) => ({ value }))];
+  const startedLabel = await prompter.select("Add this label to an issue once its agent has it", startedChoices, { custom: true });
+  return {
+    tickets: { provider: "github", labels: requiredLabels, states: ["open"], assignee, startedState: startedLabel === "none" ? null : startedLabel },
+    completion: { stateTypes: ["completed", "canceled"], states: [] },
+  };
+}
 
 /** Asks for the ticket criteria, offering the team's real states and labels when Linear is reachable. */
 async function askTickets(exec: Exec, prompter: Prompter, linear: Discovery["linear"], say: (line: string) => void) {
@@ -119,19 +177,7 @@ async function askTickets(exec: Exec, prompter: Prompter, linear: Discovery["lin
     }
   }
 
-  // agent-ready is always offered and preselected, so the default never makes every ticket eligible.
-  const labelChoices: Choice[] = labels.map((value) => ({ value }));
-  if (!labels.some((l) => l.toLowerCase() === "agent-ready")) labelChoices.unshift({ value: "agent-ready", hint: "not in Linear yet" });
-  const requiredLabels =
-    labels.length > 0
-      ? await prompter.multiselect("Labels a ticket must have (all of them)", labelChoices, {
-          defaults: indexWhere(labelChoices, (c) => c.value.toLowerCase() === "agent-ready"),
-          custom: true,
-        })
-      : splitList(await prompter.text("Labels a ticket must have (comma-separated)", { default: "agent-ready" }));
-  const missing = requiredLabels.filter((l) => labels.length > 0 && !labels.some((known) => known.toLowerCase() === l.toLowerCase()));
-  if (missing.length > 0) say(pc.yellow(`! ${missing.join(", ")} does not exist in ${team} yet; create it in Linear before running drovr`));
-  if (requiredLabels.length === 0) say(pc.yellow("! no required labels: every ticket in the chosen states is eligible"));
+  const requiredLabels = await askLabels(prompter, labels, team ? `Linear team ${team}` : "Linear", say);
 
   const stateChoices: Choice[] = states.map((s) => ({ value: s.name, hint: s.type }));
   const eligibleStates =
@@ -139,11 +185,7 @@ async function askTickets(exec: Exec, prompter: Prompter, linear: Discovery["lin
       ? await prompter.multiselect("States a ticket may be in (any of them)", stateChoices, { defaults: indexWhere(states, (s) => s.type === "unstarted") })
       : splitList(await prompter.text("States a ticket may be in (comma-separated names or types)", { default: "Todo" }));
 
-  const assignee = await prompter.select("Whose tickets", [
-    { value: "any", hint: "anyone's or unassigned" },
-    { value: "@me", hint: "assigned to you" },
-    { value: "none", hint: "unassigned only" },
-  ]);
+  const assignee = await askAssignee(prompter);
 
   const started = states.filter((s) => s.type === "started");
   const startedChoices: Choice[] = [...started.map((s) => ({ value: s.name })), { value: "none", hint: "leave the ticket's state alone" }];
@@ -188,7 +230,7 @@ export interface InitResult {
 export async function runInit(opts: InitOptions): Promise<InitResult | undefined> {
   const { exec, prompter, cwd } = opts;
   const say = opts.say ?? ((line: string) => console.log(line));
-  say(pc.dim("Looking at this repository, Linear, Herdr, and installed agents…"));
+  say(pc.dim("Looking at this repository, Linear, GitHub, Herdr, and installed agents…"));
   const found = await discover(exec, cwd);
   const repo = found.repo;
 
@@ -212,7 +254,19 @@ export async function runInit(opts: InitOptions): Promise<InitResult | undefined
   }
 
   if (repo && scope === "repo") say(`${pc.green("✓")} repository ${repo.path} (workflow "${repo.workflow}")`);
-  const { tickets, completion } = await askTickets(exec, prompter, found.linear, say);
+  // GitHub is the suggestion only when Linear is unavailable; issues come from the repository drovr runs in.
+  const source = found.github.ok
+    ? await prompter.select(
+        "Where do tickets come from?",
+        [
+          { value: "linear", hint: found.linear.detail },
+          { value: "github", hint: `issues of ${found.github.repo}` },
+        ],
+        { default: found.linear.ok ? 0 : 1 },
+      )
+    : "linear";
+  const { tickets, completion } =
+    source === "github" && repo ? await askGithubTickets(exec, prompter, repo.path, found.github, say) : await askTickets(exec, prompter, found.linear, say);
 
   let repositories: Record<string, unknown>[] | undefined;
   if (repo && scope === "repo") {

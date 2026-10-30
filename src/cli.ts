@@ -7,12 +7,12 @@ import type { Config } from "./config/schema.js";
 import { Dispatcher } from "./core/dispatcher.js";
 import { dryRunPoll } from "./core/dryrun.js";
 import { exec } from "./core/exec.js";
-import { createConsoleLogger, type Logger } from "./core/log.js";
+import { createConsoleLogger, type Logger, silentLogger } from "./core/log.js";
 import { reportPreflight, runPreflight } from "./core/preflight.js";
 import { type DispatchRecord, Store } from "./core/store.js";
 import { DEFAULT_PROMPT, loadPromptTemplate, PROMPT_VARIABLES, renderPrompt, unknownPlaceholders } from "./core/template.js";
 import { Watcher } from "./core/watcher.js";
-import { builtinRegistry, resolveProviders } from "./plugins/registry.js";
+import { builtinRegistry, resolveProviders, resolveTicketSource } from "./plugins/registry.js";
 import { runInit } from "./setup/init.js";
 import { defaultsPrompter, readlinePrompter } from "./setup/prompter.js";
 import { bindKeys, KEY_HELP } from "./ui/keys.js";
@@ -116,7 +116,8 @@ function logConfigSummary(log: Logger, { config, file, detected }: LoadedConfig)
   if (detected.repository) log.detail(`repository ${detected.repository} (the current git repository)`);
   const t = config.tickets;
   log.detail(`workflow "${config.workflow}"${detected.workflow ? " (from the repository)" : ""}, poll every ${config.pollIntervalSeconds}s, max ${config.maxConcurrent} active, first run: ${config.firstRun}`);
-  log.detail(`tickets: ${t.provider} team ${t.team ?? "(default)"}, labels [${t.labels.join(", ")}], states [${t.states.join(", ") || "any"}], assignee ${t.assignee}`);
+  const scope = t.provider === "github" ? `repo ${String(t.options.repo ?? "(current)")}` : `team ${t.team ?? "(default)"}`;
+  log.detail(`tickets: ${t.provider} ${scope}, labels [${t.labels.join(", ")}], states [${t.states.join(", ") || "any"}], assignee ${t.assignee}`);
   log.detail(`launch: ${config.agent.provider} in ${config.terminal.provider} session ${config.terminal.session ?? "(unset)"}, ${config.repositories.length} repo(s)`);
   log.detail(`state: ${config.database}`);
 }
@@ -182,7 +183,7 @@ const { version: VERSION } = JSON.parse(readFileSync(new URL("../package.json", 
 
 const program = new Command()
   .name("drovr")
-  .description("Watches Linear for eligible tickets and launches interactive coding agents in Herdr workspaces.")
+  .description("Watches Linear or GitHub for eligible tickets and launches interactive coding agents in Herdr workspaces.")
   .version(VERSION)
   .showHelpAfterError();
 
@@ -342,7 +343,7 @@ withRunOptions(program.command("prompt [ticket]").description("preview exactly w
 
 program
   .command("init")
-  .description("set up a config file, offering the Linear teams, Herdr sessions, and agents found on this machine")
+  .description("set up a config file, offering the Linear teams or GitHub labels, Herdr sessions, and agents found on this machine")
   .option("-g, --global", `write the per-user config (${globalConfigPath()}) instead of asking`)
   .option("-y, --yes", "take every suggested answer without asking")
   .option("--force", "overwrite an existing file")
@@ -366,11 +367,11 @@ withConfigOptions(program.command("history [ticket]").description("list dispatch
   .option("-a, --all", "include baseline and completed records")
   .option("-n, --limit <n>", "maximum records", positiveInt, 50)
   .option("--json", "print JSON")
-  .action((ticket: string | undefined, opts: SharedOptions & { all?: boolean; limit: number; json?: boolean }) => {
+  .action(async (ticket: string | undefined, opts: SharedOptions & { all?: boolean; limit: number; json?: boolean }) => {
     const { config } = resolveConfig(opts);
     const store = openStore(config, { readonly: true });
     if (ticket) {
-      const record = requireRecord(store, config, ticket);
+      const record = await requireRecord(store, config, ticket);
       const events = store.events(config.workflow, record.issueId);
       if (opts.json) return void console.log(JSON.stringify({ record, events }, null, 2));
       console.log(`${pc.bold(record.identifier)} ${record.title}\n${record.url ?? ""}`);
@@ -399,10 +400,10 @@ withConfigOptions(program.command("history [ticket]").description("list dispatch
 
 withConfigOptions(program.command("retry <ticket>").description("resume a failed, stuck, or baseline ticket on the next poll"))
   .option("--resend-prompt", "submit the ticket prompt again even if it may have been delivered")
-  .action((ticket: string, opts: SharedOptions & { resendPrompt?: boolean }) => {
+  .action(async (ticket: string, opts: SharedOptions & { resendPrompt?: boolean }) => {
     const { config } = resolveConfig(opts);
     const store = openStore(config);
-    const record = requireRecord(store, config, ticket);
+    const record = await requireRecord(store, config, ticket);
     if (record.state === "launching") {
       console.error(`${record.identifier} is launching right now; wait for it to finish or fail`);
       return void (process.exitCode = 1);
@@ -420,10 +421,10 @@ withConfigOptions(program.command("retry <ticket>").description("resume a failed
   });
 
 withConfigOptions(program.command("done <ticket>").description("mark a dispatch completed and free its slot"))
-  .action((ticket: string, opts: SharedOptions) => {
+  .action(async (ticket: string, opts: SharedOptions) => {
     const { config } = resolveConfig(opts);
     const store = openStore(config);
-    const record = requireRecord(store, config, ticket);
+    const record = await requireRecord(store, config, ticket);
     store.update(config.workflow, record.issueId, { state: "completed", step: null, autoResume: false, reason: "marked done by user", completedAt: new Date().toISOString() });
     store.addEvent(config.workflow, record, "completed", "Marked done by user");
     console.log(`${record.identifier}: ${record.state} → completed. The worktree and Herdr workspace are left as they are.`);
@@ -431,10 +432,10 @@ withConfigOptions(program.command("done <ticket>").description("mark a dispatch 
   });
 
 withConfigOptions(program.command("forget <ticket>").description("delete a dispatch record so the ticket can launch again when it matches"))
-  .action((ticket: string, opts: SharedOptions) => {
+  .action(async (ticket: string, opts: SharedOptions) => {
     const { config } = resolveConfig(opts);
     const store = openStore(config);
-    const record = requireRecord(store, config, ticket);
+    const record = await requireRecord(store, config, ticket);
     store.addEvent(config.workflow, record, "forgotten", `Record deleted (was ${record.state})`);
     store.delete(config.workflow, record.issueId);
     console.log(`${record.identifier}: record deleted. It launches again the next time it matches. The worktree and workspace are untouched.`);
@@ -455,8 +456,11 @@ program
     for (const def of registry.list()) console.log(`${def.kind.padEnd(9)} ${def.id.padEnd(10)} ${def.description}`);
   });
 
-function requireRecord(store: Store, config: Config, ref: string): DispatchRecord {
-  const record = store.find(config.workflow, ref);
+/** Finds a record by what the user typed, also in the ticket source's own notation (e.g. 12 for GH-12). */
+async function requireRecord(store: Store, config: Config, ref: string): Promise<DispatchRecord> {
+  const tickets = await resolveTicketSource(config, { exec, log: silentLogger });
+  const normalized = tickets.normalizeIdentifier?.(ref) ?? ref;
+  const record = store.find(config.workflow, ref) ?? (normalized !== ref ? store.find(config.workflow, normalized) : undefined);
   if (!record) {
     console.error(`No dispatch record for ${ref} in workflow "${config.workflow}"`);
     process.exit(1);

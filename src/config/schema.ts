@@ -60,9 +60,13 @@ export const configSchema = z.object({
       /**
        * Workflow state (name or type) a ticket is moved to once its agent has acknowledged the
        * ticket. Only tickets not yet started (triage, backlog, unstarted) are moved. null disables it.
+       * GitHub issues have no workflow states, so the github provider adds this as a label instead.
        */
       startedState: nonEmpty.nullable().default("In Progress"),
-      /** Provider-specific options, e.g. { "workspace": "<linear workspace slug>" } for linear. */
+      /**
+       * Provider-specific options, e.g. { "workspace": "<linear workspace slug>" } for linear or
+       * { "repo": "OWNER/REPO" } for github.
+       */
       options: z.record(z.string(), z.unknown()).default({}),
     })
     .prefault({}),
@@ -130,7 +134,7 @@ export const configSchema = z.object({
       briefPath: nonEmpty.default(".drovr/{identifier}.md"),
       /** One-line message sent with file delivery. Newlines are collapsed to spaces. */
       message: nonEmpty.default(
-        "{marker} You are assigned Linear ticket {identifier}: {title}. Read the brief in {briefPath} (ticket description and instructions) and work on the ticket as it describes.",
+        "{marker} You are assigned ticket {identifier}: {title}. Read the brief in {briefPath} (ticket description and instructions) and work on the ticket as it describes.",
       ),
     })
     .prefault({}),

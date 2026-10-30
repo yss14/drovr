@@ -58,7 +58,7 @@ export function safeName(value: string): string {
 
 export const PROMPT_MARKER = (identifier: string) => `[drovr:${identifier}]`;
 
-export const DEFAULT_PROMPT = `{marker} Linear ticket {identifier}: {title}
+export const DEFAULT_PROMPT = `{marker} Ticket {identifier}: {title}
 Ticket URL: {url}
 
 You are working in a dedicated git worktree at {worktreePath} on branch {branch} (based on {baseBranch}).
@@ -78,7 +78,7 @@ You are working in a dedicated git worktree at {worktreePath} on branch {branch}
 /** Variables available in the prompt brief and message, with descriptions (shown by `drovr prompt --variables`). */
 export const PROMPT_VARIABLES: Record<string, string> = {
   marker: "delivery marker [drovr:<ID>]; added to the front of the sent text if missing",
-  identifier: "ticket key, e.g. PQ-1234",
+  identifier: "ticket key, e.g. PQ-1234 (Linear) or GH-12 (GitHub)",
   identifierLower: "ticket key in lowercase",
   title: "ticket title",
   titleSlug: "ticket title as a slug",
@@ -89,7 +89,7 @@ export const PROMPT_VARIABLES: Record<string, string> = {
   state: "ticket state name",
   labels: "comma-separated label names",
   priority: "priority number (1 urgent … 4 low, 0 none)",
-  project: "project name",
+  project: "project name (milestone for GitHub)",
   assignee: "assignee display name",
   team: "team key",
   ticketBranch: "branch name suggested by the tracker",

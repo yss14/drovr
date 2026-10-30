@@ -75,6 +75,8 @@ export interface TicketCriteria {
 
 export interface TicketSource extends Provider {
   readonly kind: "tickets";
+  /** Maps a ticket reference typed by the user (e.g. "12" for GH-12) to the identifier drovr records. */
+  normalizeIdentifier?(ref: string): string;
   /** Human-readable summary of the query, for logs. */
   describeQuery(criteria: TicketCriteria): string;
   /** Optional startup check that the criteria refer to things that exist (team, labels). */
