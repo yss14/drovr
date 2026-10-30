@@ -89,7 +89,9 @@ export function loadConfig(opts: { file?: string; overrides?: Plain; cwd?: strin
 
   const detected: LoadedConfig["detected"] = {};
   if (opts.detect !== false) {
-    if (repo && (!Array.isArray(merged.repositories) || merged.repositories.length === 0)) {
+    // Only absent or empty repositories are inferred; anything else is left for the schema to reject.
+    const noRepositories = merged.repositories === undefined || (Array.isArray(merged.repositories) && merged.repositories.length === 0);
+    if (repo && noRepositories) {
       merged.repositories = [{ path: repo }];
       detected.repository = repo;
     }

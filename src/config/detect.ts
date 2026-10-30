@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 function git(cwd: string, args: string[]): string | undefined {
   try {
@@ -10,14 +10,19 @@ function git(cwd: string, args: string[]): string | undefined {
 }
 
 /**
- * Main checkout of the git repository containing `cwd`, or undefined outside a repository.
- * From inside a linked worktree this is the main checkout, not the worktree.
+ * Main checkout of the git repository containing `cwd`, or undefined outside a repository or in a
+ * bare one. From inside a linked worktree this is the main checkout, not the worktree.
  */
 export function detectRepository(cwd: string): string | undefined {
   const commonDir = git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-  // A bare repository has no checkout to create worktrees from.
-  if (!commonDir || basename(commonDir) !== ".git") return undefined;
-  return dirname(commonDir);
+  if (!commonDir) return undefined;
+  if (basename(commonDir) === ".git") return dirname(commonDir);
+  // Submodules keep their metadata in the superproject's .git/modules/<name> and record the
+  // checkout in core.worktree, relative to that directory.
+  const worktree = git(cwd, ["config", "--file", join(commonDir, "config"), "core.worktree"]);
+  if (worktree) return resolve(commonDir, worktree);
+  // A separate git directory (`git init --separate-git-dir`); fails in a bare repository.
+  return git(cwd, ["rev-parse", "--show-toplevel"]);
 }
 
 /** "owner/name" from a remote URL (scp-like, ssh, or https), or undefined. */

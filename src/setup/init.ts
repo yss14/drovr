@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import pc from "picocolors";
 import { detectRepository, workflowNameFor } from "../config/detect.js";
@@ -22,7 +22,7 @@ interface LinearState {
 }
 
 export interface Discovery {
-  repo?: { path: string; workflow: string; baseBranch?: string; worktrunk: boolean; setup?: string };
+  repo?: { path: string; workflow: string; baseBranch?: string; worktrunkHooks: boolean; setup?: string };
   linear: { ok: boolean; detail: string; teams: LinearTeam[] };
   sessions: { name: string; status: string }[];
   agents: string[];
@@ -40,6 +40,12 @@ function setupFromLockfile(repo: string): string | undefined {
   return lockfiles.find(([file]) => existsSync(join(repo, file)))?.[1];
 }
 
+/** Whether a worktrunk config defines pre-start hooks (a `[pre-start]` table or a `pre-start` key). */
+function hasPreStartHooks(file: string): boolean {
+  if (!existsSync(file)) return false;
+  return /^\s*(\[\s*"?pre-start"?\s*\]|"?pre-start"?\s*=)/m.test(readFileSync(file, "utf8"));
+}
+
 async function linearJson(exec: Exec, args: string[]): Promise<unknown> {
   const result = await exec("linear", [...args, "--no-input"], { timeoutMs: 60_000, env: { NO_COLOR: "1" } });
   if (result.code !== 0) throw new Error(describeFailure(result));
@@ -54,7 +60,7 @@ export async function discover(exec: Exec, cwd: string): Promise<Discovery> {
         path,
         workflow: workflowNameFor(path),
         baseBranch: (await exec("git", ["-C", path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])).stdout.trim().replace(/^origin\//, "") || undefined,
-        worktrunk: existsSync(join(path, ".config", "wt.toml")),
+        worktrunkHooks: hasPreStartHooks(join(path, ".config", "wt.toml")),
         setup: setupFromLockfile(path),
       }
     : undefined;
@@ -213,13 +219,11 @@ export async function runInit(opts: InitOptions): Promise<InitResult | undefined
     const entry: Record<string, unknown> = { path: "." };
     const base = await prompter.text("Base branch for new worktrees", { default: repo.baseBranch ?? "main" });
     if (base !== repo.baseBranch) entry.baseBranch = base;
-    if (repo.worktrunk) {
-      say(pc.dim("  worktrunk config found: its pre-start hooks set up new worktrees"));
-      entry.setup = [];
-    } else {
-      const setup = await prompter.text('Setup command for a new worktree ("none" for no setup)', { default: repo.setup ?? "none" });
-      entry.setup = setup && setup !== "none" ? [setup] : [];
-    }
+    // worktrunk's pre-start hooks already prepare new worktrees, so suggest no extra setup then.
+    if (repo.worktrunkHooks) say(pc.dim("  worktrunk pre-start hooks found: they run in every new worktree before the agent starts"));
+    const suggested = repo.worktrunkHooks ? "none" : (repo.setup ?? "none");
+    const setup = await prompter.text('Setup command for a new worktree ("none" for no setup)', { default: suggested });
+    entry.setup = setup && setup !== "none" ? [setup] : [];
     repositories = [entry];
   }
 

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -105,6 +105,26 @@ describe("drovr init", () => {
       terminal: { session: "fresh-session" },
       agent: { provider: "claude" },
     });
+  });
+
+  it("keeps suggesting the lockfile setup when the worktrunk config has no pre-start hooks", async () => {
+    const repo = gitRepo();
+    writeFileSync(join(repo, "pnpm-lock.yaml"), "");
+    mkdirSync(join(repo, ".config"));
+    writeFileSync(join(repo, ".config", "wt.toml"), 'worktree-path = "{{ repo_path }}/.worktrees/{{ branch | sanitize }}"\n');
+    const result = await runInit({ exec: fakeMachine(), prompter: defaultsPrompter(), cwd: repo, say: quiet });
+    expect(result?.config).toMatchObject({ repositories: [{ setup: ["pnpm install --frozen-lockfile"] }] });
+  });
+
+  it("suggests no extra setup when worktrunk pre-start hooks prepare the worktree, but still asks", async () => {
+    const repo = gitRepo();
+    writeFileSync(join(repo, "pnpm-lock.yaml"), "");
+    mkdirSync(join(repo, ".config"));
+    writeFileSync(join(repo, ".config", "wt.toml"), '[pre-start]\ninstall = "pnpm install"\n');
+    const quietDefaults = await runInit({ exec: fakeMachine(), prompter: defaultsPrompter(), cwd: repo, say: quiet, force: true });
+    expect(quietDefaults?.config).toMatchObject({ repositories: [{ setup: [] }] });
+    const answered = await runInit({ exec: fakeMachine(), prompter: scripted({ "Setup command": "make deps" }), cwd: repo, say: quiet, force: true });
+    expect(answered?.config).toMatchObject({ repositories: [{ setup: ["make deps"] }] });
   });
 
   it("offers agent-ready even when the team does not have it, so the default never matches every ticket", async () => {
