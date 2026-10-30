@@ -1,9 +1,8 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 import { Command, InvalidArgumentError, Option } from "commander";
 import pc from "picocolors";
-import { ConfigError, type LoadedConfig, loadConfig } from "./config/load.js";
+import { ConfigError, globalConfigPath, type LoadedConfig, loadConfig } from "./config/load.js";
 import type { Config } from "./config/schema.js";
 import { Dispatcher } from "./core/dispatcher.js";
 import { dryRunPoll } from "./core/dryrun.js";
@@ -14,6 +13,8 @@ import { type DispatchRecord, Store } from "./core/store.js";
 import { DEFAULT_PROMPT, loadPromptTemplate, PROMPT_VARIABLES, renderPrompt, unknownPlaceholders } from "./core/template.js";
 import { Watcher } from "./core/watcher.js";
 import { builtinRegistry, resolveProviders } from "./plugins/registry.js";
+import { runInit } from "./setup/init.js";
+import { defaultsPrompter, readlinePrompter } from "./setup/prompter.js";
 import { bindKeys, KEY_HELP } from "./ui/keys.js";
 
 // ── Option plumbing ────────────────────────────────────────────────────────
@@ -53,7 +54,7 @@ interface SharedOptions {
 
 function withConfigOptions(command: Command): Command {
   return command
-    .option("-c, --config <path>", "config file (default: ./drovr.config.json, then ~/.config/drovr/config.json)")
+    .option("-c, --config <path>", "config file (default: ./drovr.config.json, then the repository root's, then ~/.config/drovr/config.json)")
     .option("--workflow <name>", "workflow name that scopes dispatch state")
     .option("--db <path>", "SQLite database path")
     .option("-v, --verbose", "also log skipped tickets and why");
@@ -110,10 +111,11 @@ function resolveConfig(opts: SharedOptions): LoadedConfig {
   return loadConfig({ file: opts.config, overrides: overridesFrom(opts, base.config) });
 }
 
-function logConfigSummary(log: Logger, { config, file }: LoadedConfig): void {
+function logConfigSummary(log: Logger, { config, file, detected }: LoadedConfig): void {
   log.log("config", file ? `using ${file}` : "no config file found — using defaults and flags");
+  if (detected.repository) log.detail(`repository ${detected.repository} (the current git repository)`);
   const t = config.tickets;
-  log.detail(`workflow "${config.workflow}", poll every ${config.pollIntervalSeconds}s, max ${config.maxConcurrent} active, first run: ${config.firstRun}`);
+  log.detail(`workflow "${config.workflow}"${detected.workflow ? " (from the repository)" : ""}, poll every ${config.pollIntervalSeconds}s, max ${config.maxConcurrent} active, first run: ${config.firstRun}`);
   log.detail(`tickets: ${t.provider} team ${t.team ?? "(default)"}, labels [${t.labels.join(", ")}], states [${t.states.join(", ") || "any"}], assignee ${t.assignee}`);
   log.detail(`launch: ${config.agent.provider} in ${config.terminal.provider} session ${config.terminal.session ?? "(unset)"}, ${config.repositories.length} repo(s)`);
   log.detail(`state: ${config.database}`);
@@ -285,15 +287,16 @@ function describeRecord(r: DispatchRecord): string {
   return parts.filter(Boolean).join(" · ");
 }
 
-withRunOptions(program.command("check").description("check that configured providers are available"))
-  .action(async (opts: SharedOptions) => {
-    const log = createConsoleLogger({ verbose: opts.verbose });
-    const loaded = resolveConfig(opts);
-    logConfigSummary(log, loaded);
-    const providers = await resolveProviders(loaded.config, { exec, log });
-    const ok = reportPreflight(log, await runPreflight(loaded.config, providers, { requireLaunch: true }));
-    process.exitCode = ok ? 0 : 1;
-  });
+async function check(opts: SharedOptions): Promise<void> {
+  const log = createConsoleLogger({ verbose: opts.verbose });
+  const loaded = resolveConfig(opts);
+  logConfigSummary(log, loaded);
+  const providers = await resolveProviders(loaded.config, { exec, log });
+  const ok = reportPreflight(log, await runPreflight(loaded.config, providers, { requireLaunch: true }));
+  process.exitCode = ok ? 0 : 1;
+}
+
+withRunOptions(program.command("check").description("check that configured providers are available")).action(check);
 
 withRunOptions(program.command("config").description("print the resolved configuration (defaults ← file ← flags)"))
   .action((opts: SharedOptions) => {
@@ -339,16 +342,24 @@ withRunOptions(program.command("prompt [ticket]").description("preview exactly w
 
 program
   .command("init")
-  .description("write a starter drovr.config.json in the current directory")
+  .description("set up a config file, offering the Linear teams, Herdr sessions, and agents found on this machine")
+  .option("-g, --global", `write the per-user config (${globalConfigPath()}) instead of asking`)
+  .option("-y, --yes", "take every suggested answer without asking")
   .option("--force", "overwrite an existing file")
-  .action((opts: { force?: boolean }) => {
-    const path = resolve("drovr.config.json");
-    if (existsSync(path) && !opts.force) {
-      console.error(`${path} already exists (use --force to overwrite)`);
-      return void (process.exitCode = 1);
+  .action(async (opts: { global?: boolean; yes?: boolean; force?: boolean }) => {
+    const prompter = opts.yes || !process.stdin.isTTY ? defaultsPrompter() : readlinePrompter();
+    try {
+      const result = await runInit({ exec, prompter, cwd: process.cwd(), global: opts.global, force: opts.force });
+      if (!result) return void (process.exitCode = 1);
+      if (prompter.interactive && (await prompter.confirm("Run `drovr check` now?", true))) {
+        prompter.close();
+        console.log();
+        return check({ config: result.path });
+      }
+      console.log(`next: \`drovr check\`, then \`drovr run --dry-run --once\``);
+    } finally {
+      prompter.close();
     }
-    writeFileSync(path, `${JSON.stringify(STARTER_CONFIG, null, 2)}\n`);
-    console.log(`wrote ${path} — edit it, then run \`drovr check\` and \`drovr run --dry-run\``);
   });
 
 withConfigOptions(program.command("history [ticket]").description("list dispatch records, or the event log of one ticket"))
@@ -452,18 +463,6 @@ function requireRecord(store: Store, config: Config, ref: string): DispatchRecor
   }
   return record;
 }
-
-const STARTER_CONFIG = {
-  workflow: "default",
-  pollIntervalSeconds: 60,
-  maxConcurrent: 1,
-  firstRun: "dispatch",
-  tickets: { provider: "linear", team: "ENG", labels: ["agent-ready"], states: ["Todo"], assignee: "any" },
-  completion: { stateTypes: ["completed", "canceled"], states: ["In Review"], whenWorkspaceClosed: true },
-  repositories: [{ path: "~/code/my-repo", setup: [] }],
-  terminal: { provider: "herdr", session: "main", focus: false },
-  agent: { provider: "codex", args: [] },
-};
 
 program.parseAsync().catch((error: unknown) => {
   if (error instanceof ConfigError) console.error(pc.red(error.message));

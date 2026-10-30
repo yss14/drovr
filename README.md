@@ -26,11 +26,21 @@ Linear ──poll──▶ eligible? ──▶ already dispatched? ──▶ slo
 ```sh
 npm install --global drovr     # or: pnpm add --global drovr
 
-drovr init                     # writes ./drovr.config.json; edit it
+cd ~/code/my-repo
+drovr init                     # asks a few questions, writes the config
 drovr check                    # providers, auth, Herdr session, repo, team, labels
 drovr run --dry-run --once     # what would launch, without doing anything
 drovr run                      # watch
 ```
+
+`drovr init` looks at the repository you run it in and at your Linear teams, Herdr sessions, and installed agents, then asks for the rest with those as choices. It finds the team's labels and workflow states, the running Herdr session, and a setup command from the repository's lockfile. It writes either `drovr.config.json` at the repository root, added to `.git/info/exclude` so it is never committed, or the per-user `~/.config/drovr/config.json` (`--global`). `--yes` takes every suggested answer without asking, and so does running without a terminal.
+
+### Several repositories
+
+drovr works on the git repository you run it in. Unless the config lists `repositories`, the current repository is used, found from any subdirectory or worktree, and the `workflow` is named after its remote (`git@github.com:acme/web.git` → `acme-web`). Each repository therefore keeps its own dispatch records and watcher, all in the one database.
+
+- **Shared settings:** run `drovr init --global` once, then `drovr run` in each repository. Leave `workflow` and `repositories` out of the global file, or every repository shares them.
+- **Per-repository settings:** run `drovr init` in each repository. Its `drovr.config.json` is used instead of the global one.
 
 While `drovr run` is running in a terminal: **space** pause/resume · **p** poll now · **r** reload config · **s** status · **q** / Ctrl-C quit. Pausing stops polling and launching. A launch already in progress finishes first.
 
@@ -41,7 +51,7 @@ While `drovr run` is running in a terminal: **space** pause/resume · **p** poll
 drovr resolves its configuration in three layers. Later layers win:
 
 1. built-in defaults (below)
-2. the config file: `--config <path>`, else `$DROVR_CONFIG`, else `./drovr.config.json`, else `~/.config/drovr/config.json`
+2. the config file: `--config <path>`, else `$DROVR_CONFIG`, else `./drovr.config.json`, else `drovr.config.json` at the root of the current git repository, else `~/.config/drovr/config.json`
 3. command-line flags
 
 Objects merge key by key. Arrays (labels, states, repositories, agent args) are **replaced**, not appended. Relative paths in the file resolve against the file's directory, and `~` expands everywhere. `drovr config` prints the resolved result. See [`drovr.config.example.json`](drovr.config.example.json).
@@ -50,7 +60,7 @@ Objects merge key by key. Arrays (labels, states, repositories, agent args) are 
 
 | Key | Default | Flag | Description |
 | --- | --- | --- | --- |
-| `workflow` | `"default"` | `--workflow` | Names the dispatch scope. Records and the first-run baseline are kept per workflow, so different criteria can run as separate workflows. |
+| `workflow` | repository name | `--workflow` | Names the dispatch scope. Records, the first-run baseline, and the watcher lease are kept per workflow, so different repositories and criteria run as separate workflows. Defaults to `owner-name` from the first repository's remote (else its directory name), or `"default"` without a repository. |
 | `pollIntervalSeconds` | `60` | `--interval` | Linear poll interval (min 10). |
 | `monitorIntervalSeconds` | `10` | | How often agent and workspace state is checked between polls. |
 | `maxConcurrent` | `1` | `--max-concurrent` | Maximum active dispatches (launching, running, or needs-attention) started by drovr. |
@@ -71,7 +81,7 @@ Objects merge key by key. Arrays (labels, states, repositories, agent args) are 
 | `completion.states` | `[]` | | …or one of these state names (e.g. `"Review"`). |
 | `completion.whenWorkspaceClosed` | `true` | | …or when you close its Herdr workspace. |
 | `completion.whenAgentFinished` | `true` | | Free the slot once the agent finishes its first run on the ticket. See [Slots](#slots-finished-vs-completed). |
-| `repositories[].path` | — | `--repo` | Main checkout. `--repo` replaces the list with a single repository. |
+| `repositories[].path` | current repository | `--repo` | Main checkout. Without `repositories`, the git repository containing the current directory is used. `--repo` replaces the list with a single repository. |
 | `repositories[].vcs` | `"auto"` | | How worktrees are created: `worktrunk`, `git`, or `auto`, which picks worktrunk when the repo has `.config/wt.toml`. See [Worktree setup](#worktree-setup). |
 | `repositories[].baseBranch` | remote default branch | `--base-branch` | Branch new worktrees start from. Without it, drovr uses `origin/HEAD`. |
 | `repositories[].remote` | `"origin"` | | |
@@ -200,7 +210,7 @@ The same works per run with `--prompt-file`, `--prompt-message`, and `--prompt-d
 | `drovr run [--dry-run] [--once] [-v] [flags]` | Watch (default command). |
 | `drovr check [flags]` | Check providers: binaries, Linear auth, team and labels exist, Herdr session running, agent supported, repos valid. |
 | `drovr config [flags]` | Print the resolved config. |
-| `drovr init [--force]` | Write a starter `drovr.config.json`. |
+| `drovr init [--global] [--yes] [--force]` | Set up a config interactively. See [Quick start](#quick-start). |
 | `drovr history [ticket] [-a] [--json]` | Open dispatches (`-a`: all), or one ticket's record and event log. |
 | `drovr retry <ticket> [--resend-prompt]` | Resume a failed, needs-attention, baseline, or completed ticket on the next poll. |
 | `drovr done <ticket>` | Mark completed and free the slot. The worktree and workspace are left alone. |

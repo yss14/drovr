@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { type Config, configSchema } from "../src/config/schema.js";
 import { Dispatcher } from "../src/core/dispatcher.js";
 import type { Exec } from "../src/core/exec.js";
@@ -238,4 +242,13 @@ export function harness(configInput: Record<string, unknown> = {}) {
   const log = recordingLogger();
   const dispatcher = new Dispatcher({ config, store, providers, log, exec: noExec, promptTemplate: DEFAULT_PROMPT, startupSettleMs: 0 });
   return { config, store, tickets, terminal, vcs, providers, log, dispatcher };
+}
+
+/** A git repository with an origin remote, in a fresh temporary directory. */
+export function gitRepo(remote = "git@github.com:Acme/Web-App.git"): string {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "drovr-repo-")));
+  const git = (...args: string[]) => execFileSync("git", ["-C", dir, ...args], { stdio: "ignore" });
+  git("init", "-q", "-b", "main");
+  git("remote", "add", "origin", remote);
+  return dir;
 }

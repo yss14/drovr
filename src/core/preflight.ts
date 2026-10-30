@@ -61,7 +61,7 @@ export async function runPreflight(config: Config, providers: Providers, opts: {
     }),
   );
   if (config.repositories.length === 0) {
-    checks.push(Promise.resolve({ name: "repositories", result: { ok: !opts.requireLaunch, detail: "none configured (add repositories[] or pass --repo)" } }));
+    checks.push(Promise.resolve({ name: "repositories", result: { ok: !opts.requireLaunch, detail: "none configured (run drovr inside a git repository, add repositories[], or pass --repo)" } }));
   }
   checks.push(settle("prompt", async () => checkPrompt(config)));
   const vcsIds = new Set<string>();
