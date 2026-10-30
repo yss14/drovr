@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Command, InvalidArgumentError, Option } from "commander";
 import pc from "picocolors";
@@ -176,10 +176,12 @@ function configReloader(opts: SharedOptions & { dryRun?: boolean }, current: () 
 
 // ── Commands ───────────────────────────────────────────────────────────────
 
+const { version: VERSION } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
+
 const program = new Command()
   .name("drovr")
   .description("Watches Linear for eligible tickets and launches interactive coding agents in Herdr workspaces.")
-  .version("0.1.0")
+  .version(VERSION)
   .showHelpAfterError();
 
 withRunOptions(program.command("run", { isDefault: true }).description("watch for eligible tickets and launch agents"))
