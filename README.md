@@ -12,7 +12,7 @@ Linear ──poll──▶ eligible? ──▶ already dispatched? ──▶ slo
 
 ## Requirements
 
-- Node.js ≥ 22
+- Node.js ≥ 22 (drovr uses `better-sqlite3`, a native module; npm downloads a prebuilt binary for common platforms and otherwise compiles it, which needs a C++ toolchain such as Xcode Command Line Tools or `build-essential`)
 - `linear` ([Linear CLI](https://github.com/schpet/linear-cli), authenticated: `linear auth login`)
 - `herdr` ([Herdr](https://github.com/herdrdev/herdr), [herdr.dev](https://herdr.dev)) with a **running** named session (verified against 0.7.5)
 - `codex` and/or `claude`
@@ -24,7 +24,7 @@ Linear ──poll──▶ eligible? ──▶ already dispatched? ──▶ slo
 ## Quick start
 
 ```sh
-pnpm install && pnpm build && pnpm link --global   # or: pnpm dev -- <args>
+npm install --global drovr     # or: pnpm add --global drovr
 
 drovr init                     # writes ./drovr.config.json; edit it
 drovr check                    # providers, auth, Herdr session, repo, team, labels
@@ -248,11 +248,20 @@ export default (registry) =>
 ## Development
 
 ```sh
+pnpm install
 pnpm dev -- run --dry-run --once   # run from source
 pnpm test                          # vitest, with in-memory fake providers
 pnpm typecheck
 pnpm build
+pnpm link --global                 # put this checkout's build on your PATH as `drovr`
 ```
+
+### Releasing
+
+1. Move the `Unreleased` entries in [`CHANGELOG.md`](CHANGELOG.md) under a new version heading.
+2. `npm version <patch|minor|major>` bumps `package.json`, commits, and tags `vX.Y.Z`.
+3. `npm publish`. `prepublishOnly` runs the typecheck, tests, and a clean build first.
+4. `git push --follow-tags`, then create the GitHub release from the tag (`gh release create vX.Y.Z --notes-from-tag` or with the changelog section).
 
 ## Verified against
 
