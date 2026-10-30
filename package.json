@@ -1,6 +1,6 @@
 {
   "name": "drovr",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "CLI that picks up Linear tickets and puts your Herdr agents to work.",
   "license": "MIT",
   "author": "Yannick Stachelscheid",

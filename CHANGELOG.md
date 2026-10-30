@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
-## [0.1.0]
+## [1.0.0]
 
 First release.
 
@@ -16,5 +16,5 @@ First release.
 - Commands: `run`, `check`, `config`, `init`, `history`, `retry`, `done`, `forget`, `prompt`, `plugins`.
 - Plugin interface for ticket sources, terminals, agents, and VCS providers.
 
-[Unreleased]: https://github.com/yss14/drovr/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/yss14/drovr/releases/tag/v0.1.0
+[Unreleased]: https://github.com/yss14/drovr/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/yss14/drovr/releases/tag/v1.0.0
