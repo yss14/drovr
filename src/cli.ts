@@ -116,7 +116,8 @@ function logConfigSummary(log: Logger, { config, file, detected }: LoadedConfig)
   if (detected.repository) log.detail(`repository ${detected.repository} (the current git repository)`);
   const t = config.tickets;
   log.detail(`workflow "${config.workflow}"${detected.workflow ? " (from the repository)" : ""}, poll every ${config.pollIntervalSeconds}s, max ${config.maxConcurrent} active, first run: ${config.firstRun}`);
-  log.detail(`tickets: ${t.provider} team ${t.team ?? "(default)"}, labels [${t.labels.join(", ")}], states [${t.states.join(", ") || "any"}], assignee ${t.assignee}`);
+  const scope = t.provider === "github" ? `repo ${String(t.options.repo ?? "(current)")}` : `team ${t.team ?? "(default)"}`;
+  log.detail(`tickets: ${t.provider} ${scope}, labels [${t.labels.join(", ")}], states [${t.states.join(", ") || "any"}], assignee ${t.assignee}`);
   log.detail(`launch: ${config.agent.provider} in ${config.terminal.provider} session ${config.terminal.session ?? "(unset)"}, ${config.repositories.length} repo(s)`);
   log.detail(`state: ${config.database}`);
 }
@@ -182,7 +183,7 @@ const { version: VERSION } = JSON.parse(readFileSync(new URL("../package.json", 
 
 const program = new Command()
   .name("drovr")
-  .description("Watches Linear for eligible tickets and launches interactive coding agents in Herdr workspaces.")
+  .description("Watches Linear or GitHub for eligible tickets and launches interactive coding agents in Herdr workspaces.")
   .version(VERSION)
   .showHelpAfterError();
 
@@ -342,7 +343,7 @@ withRunOptions(program.command("prompt [ticket]").description("preview exactly w
 
 program
   .command("init")
-  .description("set up a config file, offering the Linear teams, Herdr sessions, and agents found on this machine")
+  .description("set up a config file, offering the Linear teams or GitHub labels, Herdr sessions, and agents found on this machine")
   .option("-g, --global", `write the per-user config (${globalConfigPath()}) instead of asking`)
   .option("-y, --yes", "take every suggested answer without asking")
   .option("--force", "overwrite an existing file")

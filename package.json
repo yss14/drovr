@@ -1,7 +1,7 @@
 {
   "name": "drovr",
   "version": "1.0.0",
-  "description": "CLI that picks up Linear tickets and puts your Herdr agents to work.",
+  "description": "CLI that picks up Linear tickets or GitHub issues and puts your Herdr agents to work.",
   "license": "MIT",
   "author": "Yannick Stachelscheid",
   "repository": {
@@ -15,6 +15,7 @@
   "keywords": [
     "cli",
     "linear",
+    "github-issues",
     "herdr",
     "codex",
     "claude-code",

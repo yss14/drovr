@@ -2,18 +2,18 @@
 
 CLI that picks up tickets and puts your Herdr agents to work.
 
-drovr watches Linear for tickets that match your criteria. For each newly eligible ticket it creates a git worktree, opens a workspace in your running [Herdr](https://github.com/herdrdev/herdr) session, starts an interactive Codex or Claude Code agent there, and hands it the ticket. Each ticket gets its own workspace. You can watch progress, answer questions, approve actions, interrupt, and give follow-up instructions as usual. drovr only automates the pickup.
+drovr watches Linear or GitHub Issues for tickets that match your criteria. For each newly eligible ticket it creates a git worktree, opens a workspace in your running [Herdr](https://github.com/herdrdev/herdr) session, starts an interactive Codex or Claude Code agent there, and hands it the ticket. Each ticket gets its own workspace. You can watch progress, answer questions, approve actions, interrupt, and give follow-up instructions as usual. drovr only automates the pickup.
 
 ```
-Linear ──poll──▶ eligible? ──▶ already dispatched? ──▶ slot free? ──▶ worktree ─▶ setup ─▶ Herdr workspace ─▶ agent ─▶ prompt
-                    │                  │                    │
-                  skip (why)         skip (state)         queue
+Linear / GitHub ──poll──▶ eligible? ──▶ already dispatched? ──▶ slot free? ──▶ worktree ─▶ setup ─▶ Herdr workspace ─▶ agent ─▶ prompt
+                             │                  │                    │
+                           skip (why)         skip (state)         queue
 ```
 
 ## Requirements
 
 - Node.js ≥ 22 (drovr uses `better-sqlite3`, a native module; npm downloads a prebuilt binary for common platforms and otherwise compiles it, which needs a C++ toolchain such as Xcode Command Line Tools or `build-essential`)
-- `linear` ([Linear CLI](https://github.com/schpet/linear-cli), authenticated: `linear auth login`)
+- `linear` ([Linear CLI](https://github.com/schpet/linear-cli), authenticated: `linear auth login`), or `gh` ([GitHub CLI](https://cli.github.com), authenticated: `gh auth login`) for GitHub Issues
 - `herdr` ([Herdr](https://github.com/herdrdev/herdr), [herdr.dev](https://herdr.dev)) with a **running** named session (verified against 0.7.5)
 - `codex` and/or `claude`
 - `git`
@@ -33,7 +33,7 @@ drovr run --dry-run --once     # what would launch, without doing anything
 drovr run                      # watch
 ```
 
-`drovr init` looks at the repository you run it in and at your Linear teams, Herdr sessions, and installed agents, then asks for the rest with those as choices. It finds the team's labels and workflow states, the running Herdr session, and a setup command from the repository's lockfile. It writes either `drovr.config.json` at the repository root, added to `.git/info/exclude` so it is never committed, or the per-user `~/.config/drovr/config.json` (`--global`). `--yes` takes every suggested answer without asking, and so does running without a terminal.
+`drovr init` looks at the repository you run it in and at your Linear teams, the repository's GitHub issues, Herdr sessions, and installed agents, then asks for the rest with those as choices. When `gh` can read the repository, it asks whether tickets come from Linear or GitHub. It finds the team's (or repository's) labels and workflow states, the running Herdr session, and a setup command from the repository's lockfile. It writes either `drovr.config.json` at the repository root, added to `.git/info/exclude` so it is never committed, or the per-user `~/.config/drovr/config.json` (`--global`). `--yes` takes every suggested answer without asking, and so does running without a terminal.
 
 ### Several repositories
 
@@ -68,15 +68,16 @@ Objects merge key by key. Arrays (labels, states, repositories, agent args) are 
 | `dryRun` | `false` | `--dry-run` | Show what would happen; launch and record nothing. |
 | `database` | `~/.local/state/drovr/drovr.db` | `--db` | SQLite state. |
 | `plugins` | `[]` | | Extra plugin modules. See [Plugins](#plugins). |
-| `tickets.provider` | `"linear"` | | Ticket source plugin. |
-| `tickets.team` | CLI default team | `--team` | Team key, name, or ID. |
+| `tickets.provider` | `"linear"` | | Ticket source plugin: `linear`, `github`, or a plugin. See [GitHub Issues](#github-issues). |
+| `tickets.team` | CLI default team | `--team` | Linear team key, name, or ID. Not used by `github`. |
 | `tickets.labels` | `["agent-ready"]` | `--label` (repeatable) | The ticket must have **all** of these. |
 | `tickets.excludeLabels` | `[]` | `--exclude-label` (repeatable) | The ticket must have **none** of these. |
 | `tickets.states` | `["Todo"]` | `--state` (repeatable) | State names or types (`triage`, `backlog`, `unstarted`, `started`, …). Matches **any** of them. Empty means any state. |
 | `tickets.assignee` | `"any"` | `--assignee` | `any`, `none` (unassigned), `@me`, or a user. |
-| `tickets.project` | | `--project` | Project ID, slug, or name. |
+| `tickets.project` | | `--project` | Linear project ID, slug, or name; for `github`, a milestone number or title. |
 | `tickets.startedState` | `"In Progress"` | `--started-state` (`none` disables) | State (name or type) a ticket is moved to once its agent has acknowledged the ticket. See [Moving the ticket](#moving-the-ticket). `null` disables it. |
 | `tickets.options.workspace` | | | Linear workspace slug (for multiple Linear logins). |
+| `tickets.options.repo` | the repository's GitHub remote | | `github` only: `[HOST/]OWNER/REPO` whose issues are watched. Without it, `gh` uses the first repository's remote. |
 | `completion.stateTypes` | `["completed", "canceled"]` | | A dispatch completes when its ticket reaches one of these state types… |
 | `completion.states` | `[]` | | …or one of these state names (e.g. `"Review"`). |
 | `completion.whenWorkspaceClosed` | `true` | | …or when you close its Herdr workspace. |
@@ -104,7 +105,7 @@ Objects merge key by key. Arrays (labels, states, repositories, agent args) are 
 | `prompt.templateFile` | | `--prompt-file` | Ticket brief template file. Takes precedence over `prompt.template`. See [Customising the prompt](#customising-the-prompt). |
 | `prompt.template` | built-in | | Ticket brief template, inline. |
 | `prompt.briefPath` | `".drovr/{identifier}.md"` | | Brief location inside the worktree (file delivery). |
-| `prompt.message` | `"{marker} You are assigned Linear ticket {identifier}: {title}. Read the brief in {briefPath} …"` | `--prompt-message` | The one-line text typed to the agent with file delivery. It must contain `{briefPath}`; it is not a file path (use `prompt.templateFile` for that). Newlines are collapsed to spaces. |
+| `prompt.message` | `"{marker} You are assigned ticket {identifier}: {title}. Read the brief in {briefPath} …"` | `--prompt-message` | The one-line text typed to the agent with file delivery. It must contain `{briefPath}`; it is not a file path (use `prompt.templateFile` for that). Newlines are collapsed to spaces. |
 
 Name and path templates use `{identifier}`, `{identifierLower}`, `{title}`, `{titleShort}`, `{titleSlug}`, `{titleSlugShort}`, `{url}`, `{ticketBranch}`, `{state}`, and `{team}`. Paths can also use `{repo}` and `{branchSlug}`. Prompt variables are listed under [Customising the prompt](#customising-the-prompt).
 
@@ -176,6 +177,25 @@ Once the agent has acknowledged the ticket prompt, drovr moves the ticket to `ti
 
 Moving a ticket out of `tickets.states` (e.g. out of "Todo") does not affect its dispatch. drovr tracks dispatched tickets by ID and never launches them twice.
 
+### GitHub Issues
+
+With `"tickets": { "provider": "github" }`, drovr watches the issues of a GitHub repository through `gh`. Without `tickets.options.repo`, that is the repository `gh` finds from the first repository's remote, so a global config works across repositories.
+
+GitHub issues differ from Linear tickets in a few ways:
+
+- **States.** An issue is only open or closed. Use `"states": ["open"]` (the Linear default `["Todo"]` never matches, and `drovr check` says so). Open issues have the state type `unstarted`. Closed issues are `completed`, or `canceled` when closed as not planned or duplicate, so the default `completion.stateTypes` frees the slot when an issue is closed.
+- **Started state.** There is no "In Progress" to move to, so `tickets.startedState` is a **label** that drovr adds to the issue once its agent has it, e.g. `"in-progress"`. The label must exist (`gh label create in-progress`); `drovr check` verifies it. Set it to `null` to leave issues alone.
+- **Identifiers.** Issue #12 is `GH-12` in logs, branch names, and workspace labels. `drovr retry`, `done`, `forget`, and `prompt` also take `12`.
+- **Branches.** Issues suggest no branch name, so `repositories[].fallbackBranch` is used, e.g. `drovr/gh-12-support-dark-mode`.
+- **Filters.** Labels, `assignee` (`any`, `none`, `@me`, or a login), and `project` (a milestone) are passed to `gh issue list`. Issues have no priority, so eligible issues launch oldest first.
+
+```json
+{
+  "tickets": { "provider": "github", "labels": ["agent-ready"], "states": ["open"], "startedState": "in-progress" },
+  "completion": { "states": [] }
+}
+```
+
 ### Customising the prompt
 
 What the agent receives is built from two templates:
@@ -208,7 +228,7 @@ The same works per run with `--prompt-file`, `--prompt-message`, and `--prompt-d
 | Command | |
 | --- | --- |
 | `drovr run [--dry-run] [--once] [-v] [flags]` | Watch (default command). |
-| `drovr check [flags]` | Check providers: binaries, Linear auth, team and labels exist, Herdr session running, agent supported, repos valid. |
+| `drovr check [flags]` | Check providers: binaries, Linear or GitHub auth, team and labels exist, Herdr session running, agent supported, repos valid. |
 | `drovr config [flags]` | Print the resolved config. |
 | `drovr init [--global] [--yes] [--force]` | Set up a config interactively. See [Quick start](#quick-start). |
 | `drovr history [ticket] [-a] [--json]` | Open dispatches (`-a`: all), or one ticket's record and event log. |
@@ -218,13 +238,13 @@ The same works per run with `--prompt-file`, `--prompt-message`, and `--prompt-d
 | `drovr prompt <ticket> \| --default \| --variables` | Preview the prompt for a ticket, print the built-in brief, or list template variables. |
 | `drovr plugins` | List providers. |
 
-drovr never deletes worktrees, branches, or workspaces. Its only write to Linear is moving a launched ticket to `tickets.startedState`.
+drovr never deletes worktrees, branches, or workspaces. Its only write to the tracker is moving a launched ticket to `tickets.startedState` (adding that label, for GitHub).
 
 ## Plugins
 
 Every external system sits behind a provider interface in [`src/plugins/types.ts`](src/plugins/types.ts):
 
-- `TicketSource`: list candidates, fetch details, optionally validate criteria (built in: `linear`)
+- `TicketSource`: list candidates, fetch details, optionally validate criteria (built in: `linear`, `github`)
 - `TerminalProvider`: workspaces, panes, agent start, prompt, read (built in: `herdr`)
 - `AgentProvider`: availability, launch spec per terminal, startup-dialog detection (built in: `codex`, `claude`)
 - `VcsProvider`: worktrees and their blocking setup hooks (built in: `git`, `worktrunk`)
@@ -236,12 +256,12 @@ To add one, write an ES module whose default export registers definitions, list 
 export default (registry) =>
   registry.register({
     kind: "tickets",
-    id: "github",
-    description: "GitHub issues via gh",
+    id: "jira",
+    description: "Jira issues via jira-cli",
     create: (ctx, options) => ({
       kind: "tickets",
-      id: "github",
-      checkAvailability: async () => ({ ok: true, detail: "gh ok" }),
+      id: "jira",
+      checkAvailability: async () => ({ ok: true, detail: "jira ok" }),
       describeQuery: (criteria) => `labels ${criteria.labels.join(", ")}`,
       listCandidates: async (criteria) => [/* Ticket[] */],
       getTicket: async (ref) => ({ /* Ticket */ }),
@@ -250,10 +270,10 @@ export default (registry) =>
 ```
 
 ```json
-{ "plugins": ["./my-tracker.mjs"], "tickets": { "provider": "github", "options": {} } }
+{ "plugins": ["./my-tracker.mjs"], "tickets": { "provider": "jira", "options": {} } }
 ```
 
-`ctx.exec` runs commands and `ctx.log` writes to drovr's output. `tickets.options` and `terminal.options` are passed to `create`.
+`ctx.exec` runs commands and `ctx.log` writes to drovr's output. `tickets.options` (with `cwd`, the first repository's path, unless set) and `terminal.options` are passed to `create`.
 
 ## Development
 
@@ -275,4 +295,4 @@ pnpm link --global                 # put this checkout's build on your PATH as `
 
 ## Verified against
 
-herdr 0.7.5, linear CLI 3.0.0, worktrunk 0.70.0, codex-cli 0.162.1, Claude Code 2.1.296. `drovr check` warns when the Herdr version differs. Startup-dialog patterns depend on agent wording and may need updating when agents change.
+herdr 0.7.5, linear CLI 3.0.0, gh 2.97.0, worktrunk 0.70.0, codex-cli 0.162.1, Claude Code 2.1.296. `drovr check` warns when the Herdr version differs. Startup-dialog patterns depend on agent wording and may need updating when agents change.

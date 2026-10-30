@@ -14,7 +14,7 @@ work      running  /home/u/.config/herdr/sessions/work  /home/u/.config/herdr/se
 `;
 
 /** Linear, Herdr, and PATH lookups answered from fixtures; git runs for real against the temp repository. */
-function fakeMachine(opts: { linear?: boolean; labels?: string[] } = {}): Exec {
+function fakeMachine(opts: { linear?: boolean; github?: boolean; labels?: string[] } = {}): Exec {
   const linear: Record<string, unknown> = {
     "team list": [{ key: "ENG", name: "Engineering" }, { key: "OPS", name: "Operations" }],
     "team states": [
@@ -30,7 +30,12 @@ function fakeMachine(opts: { linear?: boolean; labels?: string[] } = {}): Exec {
     const ok = (stdout: string) => ({ command, args, code: 0, stdout, stderr: "", timedOut: false });
     const fail = { command, args, code: 1, stdout: "", stderr: "nope", timedOut: false };
     if (command === "git") return realExec(command, args, options);
-    if (command === "/bin/sh") return ["linear", "codex"].includes(args[3]!) && opts.linear !== false ? ok(`/usr/bin/${args[3]}`) : fail;
+    if (command === "/bin/sh") {
+      const installed = [...(opts.linear !== false ? ["linear", "codex"] : []), ...(opts.github ? ["gh"] : [])];
+      return installed.includes(args[3]!) ? ok(`/usr/bin/${args[3]}`) : fail;
+    }
+    if (command === "gh" && args[0] === "repo") return ok(JSON.stringify({ nameWithOwner: "acme/web-app", hasIssuesEnabled: true }));
+    if (command === "gh" && args[0] === "label") return ok(JSON.stringify([{ name: "agent-ready" }, { name: "in-progress" }]));
     if (command === "herdr") return ok(HERDR_SESSIONS);
     if (command === "linear" && args[0] === "auth") return ok("me@example.com");
     const body = linear[args.slice(0, 2).join(" ")];
@@ -139,6 +144,23 @@ describe("drovr init", () => {
     expect(result?.config).not.toHaveProperty("repositories");
     expect(result?.config).toMatchObject({ tickets: { labels: ["agent-ready"], states: ["Todo"], startedState: "In Progress" } });
     expect(result?.config.tickets).not.toHaveProperty("team");
+  });
+
+  it("suggests GitHub issues when Linear is unavailable and gh knows the repository", async () => {
+    const repo = gitRepo();
+    const result = await runInit({ exec: fakeMachine({ linear: false, github: true }), prompter: defaultsPrompter(), cwd: repo, say: quiet });
+    expect(result?.config).toMatchObject({
+      tickets: { provider: "github", labels: ["agent-ready"], states: ["open"], assignee: "any", startedState: null },
+      completion: { stateTypes: ["completed", "canceled"], states: [] },
+    });
+    const answered = await runInit({
+      exec: fakeMachine({ github: true }),
+      prompter: scripted({ "Where do tickets": "github", "Add this label": "in-progress" }),
+      cwd: repo,
+      force: true,
+      say: quiet,
+    });
+    expect(answered?.config).toMatchObject({ tickets: { provider: "github", startedState: "in-progress" } });
   });
 
   it("does not overwrite an existing file unless forced", async () => {
