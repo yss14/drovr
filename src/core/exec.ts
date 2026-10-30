@@ -57,6 +57,8 @@ export const exec: Exec = (command, args, options = {}) =>
       if (timer) clearTimeout(timer);
       resolve({ command, args, code, stdout, stderr, timedOut });
     });
+    // A child that exits without reading its input closes the pipe; that is not an error here.
+    child.stdin.on("error", () => {});
     child.stdin.end(options.input ?? "");
   });
 
