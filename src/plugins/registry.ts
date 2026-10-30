@@ -107,12 +107,22 @@ export function resolveVcsId(repo: RepositoryConfig): string {
   return existsSync(join(repo.path, ".config", "wt.toml")) ? "worktrunk" : "git";
 }
 
+function createTicketSource(config: Config, ctx: ProviderContext, registry: PluginRegistry): TicketSource {
+  // cwd lets a source find its project from the repository (gh resolves the GitHub repository from it).
+  return registry.get("tickets", config.tickets.provider).create(ctx, { cwd: config.repositories[0]?.path, ...config.tickets.options });
+}
+
+/** Only the ticket source, for commands that work on local records. */
+export async function resolveTicketSource(config: Config, ctx: ProviderContext, registry = builtinRegistry()): Promise<TicketSource> {
+  for (const plugin of config.plugins) await registry.load(plugin);
+  return createTicketSource(config, ctx, registry);
+}
+
 export async function resolveProviders(config: Config, ctx: ProviderContext, registry = builtinRegistry()): Promise<Providers> {
   for (const plugin of config.plugins) await registry.load(plugin);
   const vcs = new Map<string, VcsProvider>();
   return {
-    // cwd lets a source find its project from the repository (gh resolves the GitHub repository from it).
-    tickets: registry.get("tickets", config.tickets.provider).create(ctx, { cwd: config.repositories[0]?.path, ...config.tickets.options }),
+    tickets: createTicketSource(config, ctx, registry),
     terminal: registry.get("terminal", config.terminal.provider).create(ctx, { ...config.terminal.options, session: config.terminal.session }),
     agent: registry.get("agent", config.agent.provider).create(ctx, {}),
     vcsFor(repo) {

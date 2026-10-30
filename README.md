@@ -183,11 +183,11 @@ With `"tickets": { "provider": "github" }`, drovr watches the issues of a GitHub
 
 GitHub issues differ from Linear tickets in a few ways:
 
-- **States.** An issue is only open or closed. Use `"states": ["open"]` (the Linear default `["Todo"]` never matches, and `drovr check` says so). Open issues have the state type `unstarted`. Closed issues are `completed`, or `canceled` when closed as not planned or duplicate, so the default `completion.stateTypes` frees the slot when an issue is closed.
+- **States.** An issue is only open or closed. Use `"states": ["open"]`. Only `open`, `closed`, and the types below can match; `drovr check` rejects anything else, such as the Linear default `["Todo"]` or `started`. Open issues have the state type `unstarted`. Closed issues are `completed`, or `canceled` when closed as not planned or duplicate, so the default `completion.stateTypes` frees the slot when an issue is closed.
 - **Started state.** There is no "In Progress" to move to, so `tickets.startedState` is a **label** that drovr adds to the issue once its agent has it, e.g. `"in-progress"`. The label must exist (`gh label create in-progress`); `drovr check` verifies it. Set it to `null` to leave issues alone.
-- **Identifiers.** Issue #12 is `GH-12` in logs, branch names, and workspace labels. `drovr retry`, `done`, `forget`, and `prompt` also take `12`.
+- **Identifiers.** Issue #12 is `GH-12` in logs, branch names, and workspace labels. `drovr retry`, `done`, `forget`, `history`, and `prompt` also take `12` and `#12`.
 - **Branches.** Issues suggest no branch name, so `repositories[].fallbackBranch` is used, e.g. `drovr/gh-12-support-dark-mode`.
-- **Filters.** Labels, `assignee` (`any`, `none`, `@me`, or a login), and `project` (a milestone) are passed to `gh issue list`. Issues have no priority, so eligible issues launch oldest first.
+- **Filters.** Labels, `assignee` (`any`, `none`, `@me`, or a login), and `project` (a milestone number or title) are passed to the issues API through `gh api`, which follows every page, so no matching issue is cut off. Issues have no priority, so eligible issues launch oldest first.
 
 ```json
 {
