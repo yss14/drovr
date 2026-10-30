@@ -1,11 +1,11 @@
 {
-  "workflow": "pq-agent-ready",
+  "workflow": "eng-agent-ready",
   "pollIntervalSeconds": 60,
   "maxConcurrent": 1,
   "firstRun": "dispatch",
   "tickets": {
     "provider": "linear",
-    "team": "PQ",
+    "team": "ENG",
     "labels": [
       "agent-ready"
     ],
@@ -21,13 +21,13 @@
       "canceled"
     ],
     "states": [
-      "Review"
+      "In Review"
     ],
     "whenWorkspaceClosed": true
   },
   "repositories": [
     {
-      "path": "~/Dev/pricenow/vsc-microservices",
+      "path": "~/code/my-repo",
       "vcs": "auto",
       "worktreePath": "{repo}/.worktrees/{branchSlug}",
       "setup": []
@@ -35,7 +35,7 @@
   ],
   "terminal": {
     "provider": "herdr",
-    "session": "pricenow",
+    "session": "main",
     "focus": false
   },
   "agent": {

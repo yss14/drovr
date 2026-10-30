@@ -1,23 +1,45 @@
 {
   "name": "drovr",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "CLI that picks up Linear tickets and puts your Herdr agents to work.",
   "license": "MIT",
+  "author": "Yannick Stachelscheid",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yss14/drovr.git"
+  },
+  "homepage": "https://github.com/yss14/drovr#readme",
+  "bugs": {
+    "url": "https://github.com/yss14/drovr/issues"
+  },
+  "keywords": [
+    "cli",
+    "linear",
+    "herdr",
+    "codex",
+    "claude-code",
+    "coding-agent",
+    "git-worktree",
+    "automation"
+  ],
   "type": "module",
   "bin": {
     "drovr": "dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/**/*.map",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && chmod +x dist/cli.js",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/cli.js",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",

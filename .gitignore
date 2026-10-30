@@ -153,3 +153,6 @@ dist
 drovr.config.json
 *.db
 *.db-*
+
+# local worktrees (drovr default worktree location)
+.worktrees/
