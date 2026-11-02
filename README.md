@@ -1,8 +1,8 @@
 # drovr
 
-CLI that picks up tickets and puts your Herdr agents to work.
+drovr is a CLI that picks up Linear tickets or GitHub issues and puts your Herdr agents to work.
 
-drovr watches Linear or GitHub Issues for tickets that match your criteria. For each newly eligible ticket it creates a git worktree, opens a workspace in your running [Herdr](https://github.com/herdrdev/herdr) session, starts an interactive Codex or Claude Code agent there, and hands it the ticket. Each ticket gets its own workspace. You can watch progress, answer questions, approve actions, interrupt, and give follow-up instructions as usual. drovr only automates the pickup.
+drovr polls Linear or GitHub Issues for tickets that match your criteria (by default: label `agent-ready`, state `Todo`). For each newly eligible ticket it creates a git worktree, runs the repository's setup, opens a workspace in your running [Herdr](https://github.com/herdrdev/herdr) session, starts an interactive Codex or Claude Code agent there, and hands it the ticket. Each ticket gets its own worktree and workspace, and at most `maxConcurrent` (default 1) run at once. You watch, answer questions, approve actions, and give follow-ups in Herdr as usual. drovr only automates the pickup: it never merges, and never deletes worktrees, branches, or workspaces.
 
 ```
 Linear / GitHub ──poll──▶ eligible? ──▶ already dispatched? ──▶ slot free? ──▶ worktree ─▶ setup ─▶ Herdr workspace ─▶ agent ─▶ prompt
@@ -10,22 +10,83 @@ Linear / GitHub ──poll──▶ eligible? ──▶ already dispatched? ─�
                            skip (why)         skip (state)         queue
 ```
 
-## Requirements
+`drovr run --dry-run --once` checks every provider and shows what would launch, without launching or recording anything:
 
-- Node.js ≥ 22 (drovr uses `better-sqlite3`, a native module; npm downloads a prebuilt binary for common platforms and otherwise compiles it, which needs a C++ toolchain such as Xcode Command Line Tools or `build-essential`)
-- `linear` ([Linear CLI](https://github.com/schpet/linear-cli), authenticated: `linear auth login`), or `gh` ([GitHub CLI](https://cli.github.com), authenticated: `gh auth login`) for GitHub Issues
-- `herdr` ([Herdr](https://github.com/herdrdev/herdr), [herdr.dev](https://herdr.dev)) with a **running** named session (verified against 0.7.5)
-- `codex` and/or `claude`
-- `git`
-- `wt` ([worktrunk](https://worktrunk.dev)), for repositories that use worktrunk hooks
+```console
+$ drovr run --dry-run --once --label bug
+16:41:38 drovr   DRY RUN — nothing will be launched or recorded
+16:41:38 config  using ./drovr.config.json
+                 repository ~/code/drovr (the current git repository)
+                 workflow "yss14-drovr" (from the repository), poll every 60s, max 1 active, first run: dispatch
+                 tickets: github repo (current), labels [bug], states [open], assignee any
+                 launch: claude in herdr session main, 1 repo(s)
+                 state: ~/.local/state/drovr/drovr.db
+16:41:39 check   ✓ tickets: github — gh version 2.97.0 (2026-07-31), issues of yss14/drovr; labels bug exist
+16:41:39 check   ✓ terminal: herdr — herdr 0.9.5, session "main" running
+                 warning: herdr 0.9.5 differs from the tested 0.7.5; response shapes may differ
+16:41:39 check   ✓ agent: claude — 2.1.316 (Claude Code) (~/.local/bin/claude)
+16:41:39 check   ✓ prompt — built-in template, file delivery to .drovr/{identifier}.md
+16:41:39 check   ✓ repo: ~/code/drovr — base main (remote HEAD), worktrees via git (auto) — ~/code/drovr
+16:41:39 check   ✓ vcs: git — git version 2.55.0
+16:41:39 dry-run 0 ticket(s) fetched (issues of the current repository, labels [bug], states [open], any assignee)
+16:41:39 dry-run nothing new would launch
+```
 
-`drovr check` verifies all of this.
+<!-- TODO: terminal recording of `drovr run` launching a ticket into a Herdr workspace -->
+
+## Contents
+
+- [Why drovr](#why-drovr)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Commands](#commands)
+- [Configuration](#configuration)
+- [How it behaves](#how-it-behaves)
+- [GitHub Issues](#github-issues)
+- [Customising the prompt](#customising-the-prompt)
+- [Plugins](#plugins)
+- [Development](#development)
+
+## Why drovr
+
+Hosted coding agents (Codex cloud, the Copilot coding agent, the Claude Code GitHub Action) run headless on someone else's machine and hand back a pull request. drovr runs the agent on your machine instead:
+
+- **Your real dev environment.** The agent works in a git worktree of your checkout, after your worktrunk `pre-start` hooks or setup commands have run, with your local tools, credentials, and agent config (`agent.env`).
+- **Interactive, not headless.** Each agent is a normal Codex or Claude Code session in its own Herdr workspace. You see it work, answer its questions, approve its actions, and keep giving it instructions after its first run.
+- **Picks up work as it appears.** Label a ticket `agent-ready` and it launches on the next poll, in priority order, up to your concurrency limit. A ticket is never dispatched twice, even across restarts and interrupted launches.
+
+### When not to use it
+
+- **You want unattended runs in CI or the cloud.** drovr needs a running Herdr session on your machine. Use a hosted agent or a CI action instead.
+- **You don't use Herdr.** Herdr is the only built-in terminal provider. Others need a [plugin](#plugins).
+- **Your tracker isn't Linear or GitHub Issues.** Other trackers (Jira, for example) need a ticket-source [plugin](#plugins).
+- **You want the loop closed for you.** drovr doesn't review, merge, or clean up. It starts the work and tracks it until the ticket completes or you close the workspace.
+
+## Install
+
+```sh
+npm install --global drovr     # or: pnpm add --global drovr
+```
+
+From source:
+
+```sh
+git clone https://github.com/yss14/drovr.git && cd drovr
+pnpm install && pnpm build && pnpm link --global
+```
+
+Requirements, all checked by `drovr check`:
+
+- Node.js ≥ 22. drovr uses `better-sqlite3`, a native module. npm downloads a prebuilt binary for common platforms and otherwise compiles it, which needs a C++ toolchain such as Xcode Command Line Tools or `build-essential`.
+- For Linear: `linear` ([Linear CLI](https://github.com/schpet/linear-cli)), authenticated with `linear auth login`. For GitHub Issues: `gh` ([GitHub CLI](https://cli.github.com)), authenticated with `gh auth login`.
+- `herdr` ([Herdr](https://github.com/herdrdev/herdr), [herdr.dev](https://herdr.dev)) with a **running** named session.
+- `codex` and/or `claude`.
+- `git`.
+- `wt` ([worktrunk](https://worktrunk.dev)), for repositories that use worktrunk hooks.
 
 ## Quick start
 
 ```sh
-npm install --global drovr     # or: pnpm add --global drovr
-
 cd ~/code/my-repo
 drovr init                     # asks a few questions, writes the config
 drovr check                    # providers, auth, Herdr session, repo, team, labels
@@ -35,6 +96,10 @@ drovr run                      # watch
 
 `drovr init` looks at the repository you run it in and at your Linear teams, the repository's GitHub issues, Herdr sessions, and installed agents, then asks for the rest with those as choices. When `gh` can read the repository, it asks whether tickets come from Linear or GitHub. It finds the team's (or repository's) labels and workflow states, the running Herdr session, and a setup command from the repository's lockfile. It writes either `drovr.config.json` at the repository root, added to `.git/info/exclude` so it is never committed, or the per-user `~/.config/drovr/config.json` (`--global`). `--yes` takes every suggested answer without asking, and so does running without a terminal.
 
+While `drovr run` is running in a terminal: **space** pause/resume · **p** poll now · **r** reload config · **s** status · **q** / Ctrl-C quit. Pausing stops polling and launching. A launch already in progress finishes first.
+
+**r** re-reads the config file and prompt template (command-line flags still win), runs the checks again, and swaps in the new config, then polls right away. A launch already in progress finishes with the old config first. If the file is invalid or a check fails, drovr keeps the current config and logs why. `workflow`, `database`, and `dryRun` cannot change while running, and plugin modules are not re-imported, so changes to those need a restart.
+
 ### Several repositories
 
 drovr works on the git repository you run it in. Unless the config lists `repositories`, the current repository is used, found from any subdirectory or worktree, and the `workflow` is named after its remote (`git@github.com:acme/web.git` → `acme-web`). Each repository therefore keeps its own dispatch records and watcher, all in the one database.
@@ -42,9 +107,22 @@ drovr works on the git repository you run it in. Unless the config lists `reposi
 - **Shared settings:** run `drovr init --global` once, then `drovr run` in each repository. Leave `workflow` and `repositories` out of the global file, or every repository shares them.
 - **Per-repository settings:** run `drovr init` in each repository. Its `drovr.config.json` is used instead of the global one.
 
-While `drovr run` is running in a terminal: **space** pause/resume · **p** poll now · **r** reload config · **s** status · **q** / Ctrl-C quit. Pausing stops polling and launching. A launch already in progress finishes first.
+## Commands
 
-**r** re-reads the config file and prompt template (command-line flags still win), runs the checks again, and swaps in the new config, then polls right away. A launch already in progress finishes with the old config first. If the file is invalid or a check fails, drovr keeps the current config and logs why. `workflow`, `database`, and `dryRun` cannot change while running, and plugin modules are not re-imported, so changes to those need a restart.
+| Command | |
+| --- | --- |
+| `drovr run [--dry-run] [--once] [-v] [flags]` | Watch (default command). `-v` also logs skipped tickets and why. |
+| `drovr check [flags]` | Check providers: binaries, Linear or GitHub auth, team and labels exist, Herdr session running, agent supported, repos valid. |
+| `drovr config [flags]` | Print the resolved config. |
+| `drovr init [--global] [--yes] [--force]` | Set up a config interactively. See [Quick start](#quick-start). |
+| `drovr history [ticket] [-a] [--json]` | Open dispatches (`-a`: all), or one ticket's record and event log. |
+| `drovr retry <ticket> [--resend-prompt]` | Resume a failed, needs-attention, baseline, or completed ticket on the next poll. |
+| `drovr done <ticket>` | Mark completed and free the slot. The worktree and workspace are left alone. |
+| `drovr forget <ticket>` | Delete the record so the ticket launches the next time it matches. |
+| `drovr prompt <ticket> \| --default \| --variables` | Preview the prompt for a ticket, print the built-in brief, or list template variables. |
+| `drovr plugins` | List providers. |
+
+`drovr <command> --help` lists every flag. drovr never deletes worktrees, branches, or workspaces. Its only write to the tracker is moving a launched ticket to `tickets.startedState` (adding that label, for GitHub).
 
 ## Configuration
 
@@ -61,7 +139,7 @@ Objects merge key by key. Arrays (labels, states, repositories, agent args) are 
 | Key | Default | Flag | Description |
 | --- | --- | --- | --- |
 | `workflow` | repository name | `--workflow` | Names the dispatch scope. Records, the first-run baseline, and the watcher lease are kept per workflow, so different repositories and criteria run as separate workflows. Defaults to `owner-name` from the first repository's remote (else its directory name), or `"default"` without a repository. |
-| `pollIntervalSeconds` | `60` | `--interval` | Linear poll interval (min 10). |
+| `pollIntervalSeconds` | `60` | `--interval` | Ticket poll interval (min 10). |
 | `monitorIntervalSeconds` | `10` | | How often agent and workspace state is checked between polls. |
 | `maxConcurrent` | `1` | `--max-concurrent` | Maximum active dispatches (launching, running, or needs-attention) started by drovr. |
 | `firstRun` | `"dispatch"` | `--first-run` | What the first poll of a workflow does with tickets that already match. See [First run](#first-run). |
@@ -88,7 +166,7 @@ Objects merge key by key. Arrays (labels, states, repositories, agent args) are 
 | `repositories[].remote` | `"origin"` | | |
 | `repositories[].fetch` | `true` | | Fetch the base branch first, then branch from `<remote>/<base>`. |
 | `repositories[].branch` | `"{ticketBranch}"` | | Branch name template. `{ticketBranch}` is Linear's suggested branch name. |
-| `repositories[].fallbackBranch` | `"drovr/{identifierLower}-{titleSlug}"` | | Used when the ticket has no suggested branch name. |
+| `repositories[].fallbackBranch` | `"drovr/{identifierLower}-{titleSlug}"` | | Used when the ticket has no suggested branch name (always, for GitHub issues). |
 | `repositories[].worktreePath` | `"{repo}/.worktrees/{branchSlug}"` | | Worktree location template. |
 | `repositories[].setup` | `[]` | | Extra shell commands run in a new worktree before the agent starts, after any worktrunk hooks. They should be safe to re-run. |
 | `repositories[].routeLabels` | `[]` | | With several repositories, the first one whose route labels intersect the ticket's labels is used. Otherwise the single repository without route labels is used. |
@@ -113,7 +191,7 @@ Name and path templates use `{identifier}`, `{identifierLower}`, `{title}`, `{ti
 
 ### Eligibility
 
-On every poll, drovr runs `linear issue list --json --limit all` with the team, state, label, assignee, and project filters. `--limit all` follows pagination. drovr then re-checks each ticket locally (labels, excluded labels, state name or type, assignee). That local check is authoritative and produces the reasons drovr logs. Run with `-v` to also see skipped tickets and why they were skipped.
+On every poll, drovr asks the ticket source for candidates with the team, state, label, assignee, and project filters. For Linear that is `linear issue list --json --limit all`, which follows pagination. For GitHub it is the issues API through `gh api`. drovr then re-checks each ticket locally (labels, excluded labels, state name or type, assignee). That local check is authoritative and produces the reasons drovr logs. Run with `-v` to also see skipped tickets and why they were skipped.
 
 A ticket is **newly eligible** if it matches and has no dispatch record in the workflow. An old ticket that gets the label or state later becomes eligible on the next poll. Eligible tickets launch in priority order (urgent first), then oldest first.
 
@@ -139,7 +217,7 @@ The first poll of a workflow decides what happens to tickets that **already** ma
 | `finished` | The agent finished its first run. The workspace stays open for review and follow-ups. | no |
 | `completed` | The ticket reached a completion state, its workspace was closed, or you ran `drovr done`. | no |
 
-Records are keyed by Linear's stable issue ID within the workflow, so a ticket is never dispatched twice. Each record stores the identifier, repo, branch, worktree path, Herdr workspace and pane, agent name and kind, last agent status, timestamps, attempts, and an event log.
+Records are keyed by the ticket's stable ID within the workflow, so a ticket is never dispatched twice. Each record stores the identifier, repo, branch, worktree path, Herdr workspace and pane, agent name and kind, last agent status, timestamps, attempts, and an event log.
 
 ### Slots: finished vs. completed
 
@@ -163,7 +241,7 @@ For plain git repositories, worktrees are created with `git worktree add` and on
 
 On a folder it hasn't seen before, Codex shows "Trust this folder?" and Claude Code shows "Quick safety check… Yes, I trust this folder". **Herdr 0.7.5 reports both agents as idle and interactive while these dialogs are open.** A prompt submitted at that point answers the dialog. For Codex that means trusting the folder. For Claude Code, where the default option is "No, exit", the agent quits.
 
-After the agent starts, drovr waits briefly and reads the visible screen. If it recognises one of these dialogs (patterns per agent plugin, in `src/plugins/builtin/agents.ts`), it does **not** answer it. The dispatch goes to `needs_attention`, you answer the dialog in the Herdr workspace, and drovr notices within `monitorIntervalSeconds` and submits the ticket. The same applies when an agent does not report readiness within `agent.startTimeoutSeconds`.
+After the agent starts, drovr waits briefly and reads the visible screen. If it recognises one of these dialogs (patterns per agent plugin, in [`src/plugins/builtin/agents.ts`](src/plugins/builtin/agents.ts)), it does **not** answer it. The dispatch goes to `needs_attention`, you answer the dialog in the Herdr workspace, and drovr notices within `monitorIntervalSeconds` and submits the ticket. The same applies when an agent does not report readiness within `agent.startTimeoutSeconds`.
 
 ### Prompt delivery
 
@@ -173,13 +251,26 @@ drovr submits with `herdr agent prompt --wait` and treats the prompt as delivere
 
 ### Moving the ticket
 
-Once the agent has acknowledged the ticket prompt, drovr moves the ticket to `tickets.startedState` (default "In Progress") with `linear issue update --state`. drovr only moves tickets that have not started yet (triage, backlog, or unstarted state types). A retried or adopted ticket that is already in "Review" or "Done" stays where it is. If Linear can't be reached, the launch still counts as running, and the move is retried on the next polls. `drovr check` verifies that the state exists for the team.
+Once the agent has acknowledged the ticket prompt, drovr moves the ticket to `tickets.startedState` (default "In Progress") with `linear issue update --state`. drovr only moves tickets that have not started yet (triage, backlog, or unstarted state types). A retried or adopted ticket that is already in "Review" or "Done" stays where it is. If Linear can't be reached, the launch still counts as running, and the move is retried on the next polls. `drovr check` verifies that the state exists for the team. GitHub issues get a label instead; see [GitHub Issues](#github-issues).
 
 Moving a ticket out of `tickets.states` (e.g. out of "Todo") does not affect its dispatch. drovr tracks dispatched tickets by ID and never launches them twice.
 
-### GitHub Issues
+### Interrupted launches and overlapping watchers
+
+- **One watcher per workflow.** `drovr run` takes a lease in SQLite and keeps it alive with a heartbeat. A second watcher for the same workflow refuses to start. A lease whose process is gone, or whose heartbeat is stale, is taken over. A watcher that loses its lease stops.
+- **Atomic claims.** A ticket is claimed with an insert-if-absent before anything is created.
+- **Reconciliation.** Each step records its intent before acting, and on re-run first checks whether its effect already exists. An existing worktree is reused. A workspace whose create response was lost is found by label and cwd and adopted. An agent already in the pane is adopted and renamed. A prompt whose outcome is unknown is looked up in the agent's terminal output by its `[drovr:<ID>]` marker. If the prompt can't be confirmed, drovr asks you rather than risk sending it twice (`drovr retry <ID> --resend-prompt`). On startup the watcher resumes dispatches left in `launching` before polling.
+
+## GitHub Issues
 
 With `"tickets": { "provider": "github" }`, drovr watches the issues of a GitHub repository through `gh`. Without `tickets.options.repo`, that is the repository `gh` finds from the first repository's remote, so a global config works across repositories.
+
+```json
+{
+  "tickets": { "provider": "github", "labels": ["agent-ready"], "states": ["open"], "startedState": "in-progress" },
+  "completion": { "states": [] }
+}
+```
 
 GitHub issues differ from Linear tickets in a few ways:
 
@@ -189,14 +280,7 @@ GitHub issues differ from Linear tickets in a few ways:
 - **Branches.** Issues suggest no branch name, so `repositories[].fallbackBranch` is used, e.g. `drovr/gh-12-support-dark-mode`.
 - **Filters.** Labels, `assignee` (`any`, `none`, `@me`, or a login), and `project` (a milestone number or title) are passed to the issues API through `gh api`, which follows every page, so no matching issue is cut off. Issues have no priority, so eligible issues launch oldest first.
 
-```json
-{
-  "tickets": { "provider": "github", "labels": ["agent-ready"], "states": ["open"], "startedState": "in-progress" },
-  "completion": { "states": [] }
-}
-```
-
-### Customising the prompt
+## Customising the prompt
 
 What the agent receives is built from two templates:
 
@@ -208,7 +292,7 @@ Start from the built-in brief, edit it, and point drovr at it:
 ```sh
 drovr prompt --default > ~/.config/drovr/brief.md   # the built-in brief, as a starting point
 drovr prompt --variables                           # every variable and what it contains
-drovr prompt PQ-1234                               # preview exactly what a launch would send
+drovr prompt <ticket>                              # preview exactly what a launch would send
 ```
 
 ```json
@@ -216,29 +300,6 @@ drovr prompt PQ-1234                               # preview exactly what a laun
 ```
 
 The same works per run with `--prompt-file`, `--prompt-message`, and `--prompt-delivery`. Variables include the ticket's `{identifier}`, `{title}`, `{url}`, `{description}`, `{labels}`, `{state}`, `{priority}`, `{project}`, and `{assignee}`. The launch context adds `{worktreePath}`, `{branch}`, `{baseBranch}`, `{repo}`, `{agent}`, and `{briefPath}`. `drovr check` fails on an unknown placeholder (e.g. a typo like `{descripton}`) rather than sending it verbatim. If the sent text lacks `{marker}`, drovr puts `[drovr:<ID>]` in front, because it uses the marker to recognise a delivered prompt after an interruption.
-
-### Interrupted launches and overlapping watchers
-
-- **One watcher per workflow.** `drovr run` takes a lease in SQLite and keeps it alive with a heartbeat. A second watcher for the same workflow refuses to start. A lease whose process is gone, or whose heartbeat is stale, is taken over. A watcher that loses its lease stops.
-- **Atomic claims.** A ticket is claimed with an insert-if-absent before anything is created.
-- **Reconciliation.** Each step records its intent before acting, and on re-run first checks whether its effect already exists. An existing worktree is reused. A workspace whose create response was lost is found by label and cwd and adopted. An agent already in the pane is adopted and renamed. A prompt whose outcome is unknown is looked up in the agent's terminal output by its `[drovr:<ID>]` marker. If the prompt can't be confirmed, drovr asks you rather than risk sending it twice (`drovr retry <ID> --resend-prompt`). On startup the watcher resumes dispatches left in `launching` before polling.
-
-## Commands
-
-| Command | |
-| --- | --- |
-| `drovr run [--dry-run] [--once] [-v] [flags]` | Watch (default command). |
-| `drovr check [flags]` | Check providers: binaries, Linear or GitHub auth, team and labels exist, Herdr session running, agent supported, repos valid. |
-| `drovr config [flags]` | Print the resolved config. |
-| `drovr init [--global] [--yes] [--force]` | Set up a config interactively. See [Quick start](#quick-start). |
-| `drovr history [ticket] [-a] [--json]` | Open dispatches (`-a`: all), or one ticket's record and event log. |
-| `drovr retry <ticket> [--resend-prompt]` | Resume a failed, needs-attention, baseline, or completed ticket on the next poll. |
-| `drovr done <ticket>` | Mark completed and free the slot. The worktree and workspace are left alone. |
-| `drovr forget <ticket>` | Delete the record so the ticket launches the next time it matches. |
-| `drovr prompt <ticket> \| --default \| --variables` | Preview the prompt for a ticket, print the built-in brief, or list template variables. |
-| `drovr plugins` | List providers. |
-
-drovr never deletes worktrees, branches, or workspaces. Its only write to the tracker is moving a launched ticket to `tickets.startedState` (adding that label, for GitHub).
 
 ## Plugins
 
@@ -248,6 +309,17 @@ Every external system sits behind a provider interface in [`src/plugins/types.ts
 - `TerminalProvider`: workspaces, panes, agent start, prompt, read (built in: `herdr`)
 - `AgentProvider`: availability, launch spec per terminal, startup-dialog detection (built in: `codex`, `claude`)
 - `VcsProvider`: worktrees and their blocking setup hooks (built in: `git`, `worktrunk`)
+
+```console
+$ drovr plugins
+tickets   linear     Linear via the linear CLI
+tickets   github     GitHub issues via the gh CLI
+terminal  herdr      Herdr terminal workspaces
+agent     codex      OpenAI Codex CLI
+agent     claude     Claude Code
+vcs       git        git worktrees
+vcs       worktrunk  worktrees via worktrunk (wt), waiting for its pre-start hooks
+```
 
 To add one, write an ES module whose default export registers definitions, list it in `plugins`, and select it by ID:
 
@@ -286,6 +358,8 @@ pnpm build
 pnpm link --global                 # put this checkout's build on your PATH as `drovr`
 ```
 
+Report bugs and request features in [GitHub issues](https://github.com/yss14/drovr/issues). Changes are listed in [`CHANGELOG.md`](CHANGELOG.md).
+
 ### Releasing
 
 1. Move the `Unreleased` entries in [`CHANGELOG.md`](CHANGELOG.md) under a new version heading.
@@ -293,6 +367,10 @@ pnpm link --global                 # put this checkout's build on your PATH as `
 3. `npm publish`. `prepublishOnly` runs the typecheck, tests, and a clean build first.
 4. `git push --follow-tags`, then create the GitHub release from the tag (`gh release create vX.Y.Z --notes-from-tag` or with the changelog section).
 
-## Verified against
+### Verified against
 
 herdr 0.7.5, linear CLI 3.0.0, gh 2.97.0, worktrunk 0.70.0, codex-cli 0.162.1, Claude Code 2.1.296. `drovr check` warns when the Herdr version differs. Startup-dialog patterns depend on agent wording and may need updating when agents change.
+
+## License
+
+[MIT](LICENSE)
