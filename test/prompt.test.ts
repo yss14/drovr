@@ -3,14 +3,14 @@ import { loadConfig } from "../src/config/load.js";
 import { configSchema } from "../src/config/schema.js";
 import { checkPrompt } from "../src/core/preflight.js";
 import { DEFAULT_PROMPT, render, renderPrompt, safeName, ticketVars, truncateWords, unknownPlaceholders } from "../src/core/template.js";
-import { ticket } from "./fakes.js";
+import { admitted, ticket } from "./fakes.js";
 
 const context = { worktreePath: "/wt", branch: "feature/pq-1", baseBranch: "main", repo: "/repo", agent: "Codex" };
 
 describe("renderPrompt", () => {
-  it("sends a one-line message pointing at the brief with file delivery", () => {
+  it("sends a one-line message pointing at the brief with file delivery", async () => {
     const config = configSchema.parse({});
-    const result = renderPrompt(config, DEFAULT_PROMPT, ticket(1), context);
+    const result = renderPrompt(config, DEFAULT_PROMPT, await admitted(ticket(1)), context);
     expect(result.briefPath).toBe(".drovr/PQ-1.md");
     expect(result.text).not.toContain("\n");
     expect(result.text).toMatch(/^\[drovr:PQ-1\] .*\.drovr\/PQ-1\.md/);
@@ -18,18 +18,18 @@ describe("renderPrompt", () => {
     expect(result.brief).toContain("/wt");
   });
 
-  it("sends the custom template itself with inline delivery", () => {
+  it("sends the custom template itself with inline delivery", async () => {
     const config = configSchema.parse({ prompt: { delivery: "inline" } });
-    const result = renderPrompt(config, "{marker} Fix {identifier} ({labels}) for {agent}.\n{description}", ticket(1), context);
+    const result = renderPrompt(config, "{marker} Fix {identifier} ({labels}) for {agent}.\n{description}", await admitted(ticket(1)), context);
     expect(result.briefPath).toBeUndefined();
     expect(result.text).toBe("[drovr:PQ-1] Fix PQ-1 (agent-ready) for Codex.\nDo thing 1");
   });
 
-  it("adds the delivery marker when a custom template leaves it out", () => {
+  it("adds the delivery marker when a custom template leaves it out", async () => {
     const config = configSchema.parse({ prompt: { delivery: "inline" } });
-    expect(renderPrompt(config, "Work on {identifier}", ticket(1), context).text).toBe("[drovr:PQ-1] Work on PQ-1");
+    expect(renderPrompt(config, "Work on {identifier}", await admitted(ticket(1)), context).text).toBe("[drovr:PQ-1] Work on PQ-1");
     const fileConfig = configSchema.parse({ prompt: { message: "Read {briefPath}" } });
-    expect(renderPrompt(fileConfig, "x", ticket(1), context).text).toBe("[drovr:PQ-1] Read .drovr/PQ-1.md");
+    expect(renderPrompt(fileConfig, "x", await admitted(ticket(1)), context).text).toBe("[drovr:PQ-1] Read .drovr/PQ-1.md");
   });
 
   it("flags placeholders it does not know", () => {

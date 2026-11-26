@@ -8,6 +8,7 @@ import { describeFailure, type Exec } from "./exec.js";
 import type { Logger } from "./log.js";
 import type { DispatchPatch, DispatchRecord, LaunchStep, Store } from "./store.js";
 import { PROMPT_MARKER, render, renderPrompt, safeName, ticketVars } from "./template.js";
+import type { Admission, AdmittedTicket, TrustGate } from "./trust.js";
 
 /** Raised by a step that cannot proceed without the user. */
 class Attention extends Error {
@@ -23,6 +24,7 @@ export interface DispatcherDeps {
   config: Config;
   store: Store;
   providers: Providers;
+  trust: TrustGate;
   log: Logger;
   exec: Exec;
   promptTemplate: string;
@@ -82,18 +84,23 @@ export class Dispatcher {
    * what was created instead of duplicating it.
    */
   async launch(initial: DispatchRecord): Promise<DispatchRecord> {
-    const { log, store, providers } = this.deps;
+    const { log, store, trust } = this.deps;
     let record = this.patch(initial, { state: "launching", reason: null, autoResume: false, attempts: initial.attempts + 1 });
     const resuming = initial.step !== null;
     this.event(record, "launch", resuming ? `Resuming launch at step ${initial.step} (attempt ${record.attempts})` : `Launching (attempt ${record.attempts})`);
     log.log("launch", `${record.identifier} ${resuming ? `resuming at ${initial.step}` : "starting launch"}: ${record.title}`);
 
-    let ticket: Ticket;
+    // Every launch path (fresh, retry, reconcile, auto-resume) passes here, and the brief renders from this snapshot.
+    let admission: Admission;
     try {
-      ticket = await providers.tickets.getTicket({ id: record.issueId, identifier: record.identifier });
+      admission = await trust.admit({ id: record.issueId, identifier: record.identifier });
     } catch (error) {
       return this.fail(record, "worktree", `Could not load ticket details: ${(error as Error).message}`);
     }
+    if (!admission.ok) {
+      return this.fail(record, "worktree", `not trusted: ${admission.verdict.reason}, then run \`drovr retry ${record.identifier}\``);
+    }
+    const ticket = admission.ticket;
 
     let step: LaunchStep = "worktree";
     try {
@@ -337,7 +344,7 @@ export class Dispatcher {
     );
   }
 
-  private async stepPrompt(record: DispatchRecord, ticket: Ticket): Promise<DispatchRecord> {
+  private async stepPrompt(record: DispatchRecord, ticket: AdmittedTicket): Promise<DispatchRecord> {
     const { providers, log } = this.deps;
     record = this.patch(record, { step: "prompt" });
     if (record.promptedAt) return record;

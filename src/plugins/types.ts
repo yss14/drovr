@@ -60,6 +60,75 @@ export interface Ticket {
   description?: string;
 }
 
+/** A ticket's stable ID and its human-facing key. */
+export interface TicketRef {
+  id: string;
+  identifier: string;
+}
+
+/**
+ * A tracker user's stable ID (GitHub user node ID, Linear user UUID). Logins, emails, and display
+ * names are references a provider resolves to one; they are never compared directly.
+ */
+export type ActorId = string & { readonly __brand: "ActorId" };
+
+/** Brands a tracker's own user ID, where a provider parses it from the tracker's response. */
+export const actorId = (id: string): ActorId => id as ActorId;
+
+export interface Actor {
+  id: ActorId;
+  /** For messages only. */
+  name: string;
+}
+
+/** Epoch milliseconds. */
+export type Instant = number;
+
+/** Something someone did at a time. A null actor is a deleted user, bot, integration, or automation. */
+export interface Attribution {
+  actor: Actor | null;
+  at: Instant;
+}
+
+export interface ContentEdit extends Attribution {
+  field: "title" | "description";
+}
+
+/**
+ * Who created, labeled, and edited one ticket, normalized across trackers: the provider applies its
+ * tracker's quirks so the trust rule never branches on the provider.
+ */
+export interface Provenance {
+  created: Attribution;
+  /**
+   * The latest application of each label, keyed by lowercased name. A label the ticket carried at
+   * creation and never re-applied maps to `created`. A label the provider cannot attribute from the
+   * history it read is absent, never guessed.
+   */
+  labeled: ReadonlyMap<string, Attribution>;
+  /** Every title and description change from `completeSince` on. */
+  edited: readonly ContentEdit[];
+  /** `labeled` and `edited` are complete from this instant on; `created.at` when all history was read. */
+  completeSince: Instant;
+}
+
+export interface ResolvedActor {
+  /** The reference as configured in tickets.trustedActors, e.g. "@me" or "octocat". */
+  ref: string;
+  actor: Actor;
+}
+
+export interface ProvenanceReader {
+  /** Resolves "@me" and configured references to actors. Rejects, naming the reference, when one does not resolve. */
+  resolveActors(refs: readonly string[]): Promise<ResolvedActor[]>;
+  /**
+   * Provenance of each ticket, keyed by the `id` of the ref passed in; a ticket that does not exist is
+   * absent. Must reflect the tracker no earlier than the moment of the call: drovr reads content first,
+   * then provenance, so every edit behind the content it renders is in the provenance it judges.
+   */
+  read(refs: readonly TicketRef[]): Promise<Map<string, Provenance>>;
+}
+
 export interface TicketCriteria {
   team?: string;
   /** Ticket must carry every one of these labels. */
@@ -84,11 +153,16 @@ export interface TicketSource extends Provider {
   /** Fetch all candidate tickets (handles pagination). Results may be a superset; drovr re-filters. */
   listCandidates(criteria: TicketCriteria): Promise<Ticket[]>;
   /** Fetch full details (description, branch name) for prompting. */
-  getTicket(ref: { id: string; identifier: string }): Promise<Ticket>;
+  getTicket(ref: TicketRef): Promise<Ticket>;
   /** Move a ticket to a workflow state (by name or type). Optional: sources without it cannot update tickets. */
-  moveTicket?(ref: { id: string; identifier: string }, state: string): Promise<void>;
+  moveTicket?(ref: TicketRef, state: string): Promise<void>;
   /** Optional startup check that a workflow state exists for the team. */
   checkState?(state: string, team?: string): Promise<AvailabilityResult>;
+  /**
+   * Who labeled and edited tickets. Optional, but without it drovr launches nothing while
+   * tickets.trustedActors is set (the default).
+   */
+  provenance?: ProvenanceReader;
 }
 
 // ── Terminal multiplexer ───────────────────────────────────────────────────

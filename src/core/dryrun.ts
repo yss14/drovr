@@ -4,23 +4,28 @@ import type { Dispatcher } from "./dispatcher.js";
 import { compareTickets, criteriaFromConfig, evaluateTicket } from "./eligibility.js";
 import type { Logger } from "./log.js";
 import type { Store } from "./store.js";
+import type { Admission, TrustGate } from "./trust.js";
 
 /**
  * Shows what one poll would do — baseline, launch, queue, or skip — without writing state,
  * creating worktrees, or touching the terminal. Reads existing dispatch state if available.
  */
-export async function dryRunPoll(deps: { config: Config; providers: Providers; store?: Store; dispatcher: Dispatcher; log: Logger }): Promise<void> {
-  const { config, providers, store, dispatcher, log } = deps;
+export async function dryRunPoll(deps: { config: Config; providers: Providers; store?: Store; dispatcher: Dispatcher; trust: TrustGate; log: Logger }): Promise<void> {
+  const { config, providers, store, dispatcher, trust, log } = deps;
   const criteria = criteriaFromConfig(config);
   const tickets = await providers.tickets.listCandidates(criteria);
   log.log("dry-run", `${tickets.length} ticket(s) fetched (${providers.tickets.describeQuery(criteria)})`);
 
-  const eligible = [];
+  const matching = [];
   for (const ticket of tickets) {
     const evaluation = evaluateTicket(ticket, criteria);
-    if (evaluation.eligible) eligible.push(ticket);
+    if (evaluation.eligible) matching.push(ticket);
     else log.log("dry-run", `${ticket.identifier} would be skipped: ${evaluation.reasons.join("; ")}`);
   }
+  const screen = await trust.screen(matching.filter((t) => !store?.get(config.workflow, t.id)));
+  if (screen.readError) log.log("dry-run", `could not read who labeled or edited tickets: ${screen.readError}`);
+  for (const { ticket, verdict } of screen.refused) log.log("dry-run", `${ticket.identifier} would be skipped: not trusted: ${verdict.reason}`);
+  const eligible = matching.filter((t) => !screen.refusedIds.has(t.id));
 
   const baselineDone = store?.getMeta(config.workflow, "baseline_done_at");
   if (!baselineDone && config.firstRun === "baseline") {
@@ -44,10 +49,21 @@ export async function dryRunPoll(deps: { config: Config; providers: Providers; s
       log.log("dry-run", `${ticket.identifier} would be queued (no free slot): ${ticket.title}`);
       continue;
     }
-    free -= 1;
-    log.log("dry-run", `${ticket.identifier} WOULD LAUNCH (${reasons}): ${ticket.title}`);
+    let admission: Admission;
     try {
-      const plan = await dispatcher.plan(await providers.tickets.getTicket(ticket));
+      admission = await trust.admit(ticket);
+    } catch (error) {
+      log.log("dry-run", `${ticket.identifier} would fail to load: ${(error as Error).message}`);
+      continue;
+    }
+    if (!admission.ok) {
+      log.log("dry-run", `${ticket.identifier} would be refused at launch: ${admission.verdict.reason}`);
+      continue;
+    }
+    free -= 1;
+    log.log("dry-run", `${ticket.identifier} WOULD LAUNCH (${reasons}; ${admission.verdict.basis}): ${ticket.title}`);
+    try {
+      const plan = await dispatcher.plan(admission.ticket);
       log.detail(`repo ${plan.repo.path}, branch ${plan.branch} from ${plan.repo.remote}/${plan.baseBranch}`);
       const vcs = providers.vcsFor(plan.repo);
       log.detail(`worktree ${plan.worktreePath} via ${vcs.id}${vcs.runSetupHooks ? " (the agent starts after its pre-start hooks finish)" : ""}`);

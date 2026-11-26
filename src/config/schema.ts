@@ -64,6 +64,16 @@ export const configSchema = z.object({
        */
       startedState: nonEmpty.nullable().default("In Progress"),
       /**
+       * Who may start an agent: a ticket launches only if each of `labels` was last applied by one of
+       * these (the creator counts for labels set at creation; with no `labels`, the creator decides) and
+       * nobody else changed its title or description since. "@me" is the user the CLI is logged in as;
+       * others are GitHub logins, or Linear emails or user IDs. "any" turns the check off.
+       */
+      trustedActors: z
+        .union([z.literal("any"), z.array(nonEmpty)])
+        .default(["@me"])
+        .refine((actors) => actors === "any" || actors.length > 0, 'list at least one actor, or set it to "any" to turn the trust check off'),
+      /**
        * Provider-specific options, e.g. { "workspace": "<linear workspace slug>" } for linear or
        * { "repo": "OWNER/REPO" } for github.
        */

@@ -11,6 +11,7 @@ import { createConsoleLogger, type Logger, silentLogger } from "./core/log.js";
 import { reportPreflight, runPreflight } from "./core/preflight.js";
 import { type DispatchRecord, Store } from "./core/store.js";
 import { DEFAULT_PROMPT, loadPromptTemplate, PROMPT_VARIABLES, renderPrompt, unknownPlaceholders } from "./core/template.js";
+import { TrustGate } from "./core/trust.js";
 import { Watcher } from "./core/watcher.js";
 import { builtinRegistry, resolveProviders, resolveTicketSource } from "./plugins/registry.js";
 import { runInit } from "./setup/init.js";
@@ -135,11 +136,12 @@ async function setup(opts: SharedOptions & { dryRun?: boolean }) {
   return { log, store, ...(await buildRuntime(loaded, store, log)) };
 }
 
-/** Providers and dispatcher for a resolved config; rebuilt around the same store on a config reload. */
+/** Providers, trust gate, and dispatcher for a resolved config; rebuilt around the same store on a config reload. */
 async function buildRuntime(loaded: LoadedConfig, store: Store, log: Logger) {
   const providers = await resolveProviders(loaded.config, { exec, log });
-  const dispatcher = new Dispatcher({ config: loaded.config, store, providers, log, exec, promptTemplate: loadPromptTemplate(loaded.config) });
-  return { loaded, config: loaded.config, providers, dispatcher };
+  const trust = await TrustGate.create(loaded.config, providers.tickets);
+  const dispatcher = new Dispatcher({ config: loaded.config, store, providers, trust, log, exec, promptTemplate: loadPromptTemplate(loaded.config) });
+  return { loaded, config: loaded.config, providers, trust, dispatcher };
 }
 
 type Runtime = Awaited<ReturnType<typeof buildRuntime>>;
@@ -163,7 +165,7 @@ function configReloader(opts: SharedOptions & { dryRun?: boolean }, current: () 
         dryRun(next.config) !== dryRun(current()) ? "dryRun" : undefined,
       ].filter(Boolean);
       if (fixed.length > 0) throw new Error(`${fixed.join(", ")} cannot change while running; restart drovr to apply`);
-      if (!reportPreflight(log, await runPreflight(next.config, next.providers, { requireLaunch: !dryRun(next.config) }))) {
+      if (!reportPreflight(log, await runPreflight(next.config, next.providers, next.trust, { requireLaunch: !dryRun(next.config) }))) {
         throw new Error("some checks failed");
       }
       await apply(next);
@@ -191,19 +193,19 @@ withRunOptions(program.command("run", { isDefault: true }).description("watch fo
   .option("--dry-run", "show which tickets would launch without launching or recording anything")
   .option("--once", "poll once and exit")
   .action(async (opts: SharedOptions & { dryRun?: boolean; once?: boolean }) => {
-    const { log, loaded, config, providers, store, dispatcher } = await setup(opts);
+    const { log, loaded, config, providers, trust, store, dispatcher } = await setup(opts);
     const dryRun = Boolean(opts.dryRun || config.dryRun);
     log.log("drovr", dryRun ? pc.yellow("DRY RUN — nothing will be launched or recorded") : "starting");
     logConfigSummary(log, loaded);
 
-    const ok = reportPreflight(log, await runPreflight(config, providers, { requireLaunch: !dryRun }));
+    const ok = reportPreflight(log, await runPreflight(config, providers, trust, { requireLaunch: !dryRun }));
     if (!ok) {
       log.log("error", dryRun ? "some checks failed; dry run continues with what is available" : "fix the failed checks above and try again");
       if (!dryRun) return void (process.exitCode = 1);
     }
 
     if (dryRun) {
-      let runtime: Runtime = { loaded, config, providers, dispatcher };
+      let runtime: Runtime = { loaded, config, providers, trust, dispatcher };
       const pollOnce = () => dryRunPoll({ ...runtime, store, log }).catch((error: Error) => log.log("error", error.message));
       await pollOnce();
       if (opts.once || !process.stdin.isTTY) return store.close();
@@ -229,7 +231,7 @@ withRunOptions(program.command("run", { isDefault: true }).description("watch fo
       return store.close();
     }
 
-    const watcher = new Watcher({ config, store, providers, dispatcher, log });
+    const watcher = new Watcher({ config, store, providers, dispatcher, trust, log });
     let current = config;
     const reload = configReloader(opts, () => current, store, log, async (next) => {
       if (watcher.phase === "launching") log.log("config", "applies once the launch in progress finishes");
@@ -293,7 +295,8 @@ async function check(opts: SharedOptions): Promise<void> {
   const loaded = resolveConfig(opts);
   logConfigSummary(log, loaded);
   const providers = await resolveProviders(loaded.config, { exec, log });
-  const ok = reportPreflight(log, await runPreflight(loaded.config, providers, { requireLaunch: true }));
+  const trust = await TrustGate.create(loaded.config, providers.tickets);
+  const ok = reportPreflight(log, await runPreflight(loaded.config, providers, trust, { requireLaunch: true }));
   process.exitCode = ok ? 0 : 1;
 }
 
@@ -319,9 +322,15 @@ withRunOptions(program.command("prompt [ticket]").description("preview exactly w
       console.error("Pass a ticket (e.g. drovr prompt PQ-1234), --default, or --variables");
       return void (process.exitCode = 1);
     }
-    const { providers, config, dispatcher, store } = await setup({ ...opts, dryRun: true });
+    const { providers, config, dispatcher, trust, store } = await setup({ ...opts, dryRun: true });
     store.close();
-    const ticket = await providers.tickets.getTicket({ id: ref, identifier: ref });
+    const admission = await trust.admit({ id: ref, identifier: ref });
+    if (!admission.ok) {
+      console.error(pc.red(`trust: REFUSED — ${admission.verdict.reason}. drovr would not launch ${admission.ticket.identifier}.`));
+      return void (process.exitCode = 1);
+    }
+    const { ticket } = admission;
+    console.error(pc.dim(`trust: ${admission.verdict.basis}`));
     const plan = await dispatcher.plan(ticket).catch(() => undefined);
     const rendered = renderPrompt(config, loadPromptTemplate(config), ticket, {
       worktreePath: plan?.worktreePath,

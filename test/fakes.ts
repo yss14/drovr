@@ -8,8 +8,24 @@ import type { Exec } from "../src/core/exec.js";
 import { type Logger } from "../src/core/log.js";
 import { Store } from "../src/core/store.js";
 import { DEFAULT_PROMPT } from "../src/core/template.js";
+import { type AdmittedTicket, TrustGate, type TrustPolicy } from "../src/core/trust.js";
 import type { Providers } from "../src/plugins/registry.js";
-import type { AgentState, PaneState, StartAgentResult, TerminalProvider, Ticket, TicketSource, VcsProvider, WorktreeInfo } from "../src/plugins/types.js";
+import {
+  type Actor,
+  actorId,
+  type AgentState,
+  type Attribution,
+  type ContentEdit,
+  type PaneState,
+  type Provenance,
+  type ProvenanceReader,
+  type StartAgentResult,
+  type TerminalProvider,
+  type Ticket,
+  type TicketSource,
+  type VcsProvider,
+  type WorktreeInfo,
+} from "../src/plugins/types.js";
 
 export function ticket(n: number, overrides: Partial<Ticket> = {}): Ticket {
   return {
@@ -27,10 +43,87 @@ export function ticket(n: number, overrides: Partial<Ticket> = {}): Ticket {
   };
 }
 
+export const ME: Actor = { id: actorId("user-me"), name: "me" };
+export const MALLORY: Actor = { id: actorId("user-mallory"), name: "mallory" };
+
+type FakeEvent = { kind: "label"; label: string; by: Attribution } | { kind: "edit"; edit: ContentEdit };
+
+/**
+ * Tickets in memory. Every ticket was created by ME at instant 0 carrying its labels, unless `label` or
+ * `edit` record later acts.
+ */
 export class FakeTickets implements TicketSource {
   readonly kind = "tickets" as const;
   readonly id = "fake";
   tickets: Ticket[] = [];
+  users = new Map<string, Actor>([
+    ["@me", ME],
+    ["mallory", MALLORY],
+  ]);
+  events = new Map<string, FakeEvent[]>();
+  /** Identifiers per provenance read. */
+  reads: string[][] = [];
+  /** Runs after getTicket returned, e.g. an edit landing between the content read and the provenance read. */
+  afterGetTicket?: (ticket: Ticket) => void;
+  private clock = 0;
+
+  /** Records `by` applying `label` now, and puts it on the ticket. */
+  label(id: string, label: string, by: Actor | null) {
+    const found = this.find(id);
+    if (!found.labels.includes(label)) found.labels.push(label);
+    this.record(found, { kind: "label", label, by: { actor: by, at: this.tick() } });
+  }
+
+  /** Records `by` editing the ticket's title or description now. */
+  edit(id: string, field: ContentEdit["field"], by: Actor | null, text: string) {
+    const found = this.find(id);
+    if (field === "title") found.title = text;
+    else found.description = text;
+    this.record(found, { kind: "edit", edit: { field, actor: by, at: this.tick() } });
+  }
+
+  provenance: ProvenanceReader = {
+    resolveActors: async (refs) =>
+      refs.map((ref) => {
+        const actor = this.users.get(ref);
+        if (!actor) throw new Error(`no fake user "${ref}"`);
+        return { ref, actor };
+      }),
+    read: async (refs) => {
+      this.reads.push(refs.map((r) => r.identifier));
+      const result = new Map<string, Provenance>();
+      for (const ref of refs) {
+        const found = this.tickets.find((t) => t.id === ref.id);
+        if (found) result.set(ref.id, this.provenanceOf(found));
+      }
+      return result;
+    },
+  };
+
+  private provenanceOf(ticket: Ticket): Provenance {
+    const created: Attribution = { actor: ME, at: 0 };
+    const events = this.events.get(ticket.id) ?? [];
+    const labeled = new Map<string, Attribution>(ticket.labels.map((l) => [l.toLowerCase(), created]));
+    for (const e of events) if (e.kind === "label") labeled.set(e.label.toLowerCase(), e.by);
+    const edited = events.flatMap((e) => (e.kind === "edit" ? [e.edit] : []));
+    return { created, labeled, edited, completeSince: 0 };
+  }
+
+  private find(id: string): Ticket {
+    const found = this.tickets.find((t) => t.id === id);
+    if (!found) throw new Error(`no ticket ${id}`);
+    return found;
+  }
+
+  private tick(): number {
+    return ++this.clock;
+  }
+
+  private record(ticket: Ticket, event: FakeEvent) {
+    this.events.set(ticket.id, [...(this.events.get(ticket.id) ?? []), event]);
+    ticket.updatedAt = new Date(event.kind === "label" ? event.by.at : event.edit.at).toISOString();
+  }
+
   async checkAvailability() {
     return { ok: true, detail: "fake" };
   }
@@ -52,8 +145,8 @@ export class FakeTickets implements TicketSource {
     found.state = { name: state, type: "started" };
   }
   async getTicket(ref: { id: string }) {
-    const found = this.tickets.find((t) => t.id === ref.id);
-    if (!found) throw new Error(`no ticket ${ref.id}`);
+    const found = structuredClone(this.find(ref.id));
+    this.afterGetTicket?.(found);
     return found;
   }
 }
@@ -240,8 +333,28 @@ export function harness(configInput: Record<string, unknown> = {}) {
     },
   };
   const log = recordingLogger();
-  const dispatcher = new Dispatcher({ config, store, providers, log, exec: noExec, promptTemplate: DEFAULT_PROMPT, startupSettleMs: 0 });
-  return { config, store, tickets, terminal, vcs, providers, log, dispatcher };
+  const trust = trustGate(config, tickets);
+  const dispatcher = new Dispatcher({ config, store, providers, trust, log, exec: noExec, promptTemplate: DEFAULT_PROMPT, startupSettleMs: 0 });
+  return { config, store, tickets, terminal, vcs, providers, log, trust, dispatcher };
+}
+
+/** What TrustGate.create builds for the fake source, without awaiting it. */
+export function trustGate(config: Config, tickets: FakeTickets, now?: () => number): TrustGate {
+  const refs = config.tickets.trustedActors;
+  const policy: TrustPolicy =
+    refs === "any"
+      ? { kind: "off" }
+      : { kind: "actors", reader: tickets.provenance, actors: new Map(refs.map((ref) => [tickets.users.get(ref)!.id, { ref, actor: tickets.users.get(ref)! }])) };
+  return new TrustGate(policy, tickets, config.tickets.labels, now);
+}
+
+/** A ticket as the trust gate hands it to the renderer. */
+export async function admitted(t: Ticket): Promise<AdmittedTicket> {
+  const tickets = new FakeTickets();
+  tickets.tickets.push(t);
+  const admission = await trustGate(configSchema.parse({}), tickets).admit(t);
+  if (!admission.ok) throw new Error(admission.verdict.reason);
+  return admission.ticket;
 }
 
 /** A git repository with an origin remote, in a fresh temporary directory. */

@@ -5,6 +5,7 @@ import type { AvailabilityResult } from "../plugins/types.js";
 import { criteriaFromConfig } from "./eligibility.js";
 import { loadPromptTemplate, unknownPlaceholders } from "./template.js";
 import type { Logger } from "./log.js";
+import type { TrustGate } from "./trust.js";
 
 export interface CheckResult {
   name: string;
@@ -15,7 +16,7 @@ export interface CheckResult {
  * Checks that every configured provider is usable: binaries present, authenticated, Herdr
  * session running, repositories valid, agent kind supported by the terminal.
  */
-export async function runPreflight(config: Config, providers: Providers, opts: { requireLaunch: boolean }): Promise<CheckResult[]> {
+export async function runPreflight(config: Config, providers: Providers, trust: TrustGate, opts: { requireLaunch: boolean }): Promise<CheckResult[]> {
   const settle = async (name: string, fn: () => Promise<AvailabilityResult>): Promise<CheckResult> => {
     try {
       return { name, result: await fn() };
@@ -41,6 +42,7 @@ export async function runPreflight(config: Config, providers: Providers, opts: {
         warnings: results.flatMap((r) => r.warnings ?? []),
       };
     }),
+    settle(`trust: ${tickets.id}`, async () => trust.availability()),
   ];
 
   if (opts.requireLaunch || config.terminal.session) {

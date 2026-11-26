@@ -59,6 +59,15 @@ describe("config", () => {
     expect(() => loadConfig({ file })).toThrow(/maxConcurrent/);
   });
 
+  it("trusts only the CLI user by default, takes \"any\" to turn the check off, and rejects an empty list", () => {
+    expect(configSchema.parse({}).tickets.trustedActors).toEqual(["@me"]);
+    expect(configSchema.parse({ tickets: { trustedActors: "any" } }).tickets.trustedActors).toBe("any");
+    expect(configSchema.parse({ tickets: { trustedActors: ["@me", "octocat"] } }).tickets.trustedActors).toEqual(["@me", "octocat"]);
+    const { file } = configFile({ tickets: { trustedActors: [] } });
+    expect(() => loadConfig({ file })).toThrow(/set it to "any" to turn the trust check off\n.*at tickets\.trustedActors/);
+    expect(() => configSchema.parse({ tickets: { trustedActors: "anyone" } })).toThrow();
+  });
+
   it("merges nested objects", () => {
     expect(mergeConfig({ a: { b: 1, c: 2 } }, { a: { c: 3 } })).toEqual({ a: { b: 1, c: 3 } });
   });
