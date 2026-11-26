@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { assessTrust, type TrustPolicy } from "../src/core/trust.js";
-import { type Actor, actorId, type Attribution, type ContentEdit, type Provenance, type ProvenanceReader } from "../src/plugins/types.js";
+import { configSchema } from "../src/config/schema.js";
+import { runPreflight } from "../src/core/preflight.js";
+import { assessTrust, TrustGate, type TrustPolicy } from "../src/core/trust.js";
+import { Watcher } from "../src/core/watcher.js";
+import { type Actor, actorId, type Attribution, type ContentEdit, type Provenance, type ProvenanceReader, type TicketSource } from "../src/plugins/types.js";
+import { FakeTickets, harness, MALLORY, ticket, trustGate } from "./fakes.js";
 
 const me: Actor = { id: actorId("U_me"), name: "yss" };
 const ally: Actor = { id: actorId("U_ally"), name: "octocat" };
@@ -114,5 +118,99 @@ describe("assessTrust", () => {
 
   it("refuses a ticket whose provenance could not be read", () => {
     expect(assess(undefined)).toMatchObject({ trusted: false, distrust: { kind: "unreadable" } });
+  });
+});
+
+/** A third-party ticket source that cannot report provenance. */
+function withoutProvenance(fake: FakeTickets): TicketSource {
+  return {
+    kind: "tickets",
+    id: "acme-jira",
+    checkAvailability: () => fake.checkAvailability(),
+    describeQuery: () => fake.describeQuery(),
+    listCandidates: () => fake.listCandidates(),
+    getTicket: (ref) => fake.getTicket(ref),
+  };
+}
+
+describe("TrustGate", () => {
+  it("resolves tickets.trustedActors and describes the rule for drovr check", async () => {
+    const gate = await TrustGate.create(configSchema.parse({ tickets: { trustedActors: ["@me", "mallory"] } }), new FakeTickets());
+    expect(gate.availability()).toEqual({
+      ok: true,
+      detail: "launches tickets whose agent-ready label was applied by me (@me) or mallory, with no title or description edits by anyone else since",
+    });
+  });
+
+  it("fails closed, naming the actor, when a trusted actor does not resolve", async () => {
+    const gate = await TrustGate.create(configSchema.parse({ tickets: { trustedActors: ["@me", "octcat"] } }), new FakeTickets());
+    expect(gate.availability()).toEqual({ ok: false, detail: 'tickets.trustedActors: no fake user "octcat"' });
+  });
+
+  it('passes with a warning when tickets.trustedActors is "any"', async () => {
+    const gate = await TrustGate.create(configSchema.parse({ tickets: { trustedActors: "any" } }), new FakeTickets());
+    expect(gate.availability()).toMatchObject({ ok: true, warnings: ["anyone who can put agent-ready on a ticket can start an agent on this machine"] });
+  });
+
+  it("fails drovr check and launches nothing for a source without provenance, until trust is turned off", async () => {
+    const h = harness({ firstRun: "dispatch" });
+    h.tickets.tickets.push(ticket(1));
+    const source = withoutProvenance(h.tickets);
+    const providers = { ...h.providers, tickets: source };
+    const gate = await TrustGate.create(h.config, source);
+    const checks = await runPreflight(h.config, providers, gate, { requireLaunch: false });
+    expect(checks.find((c) => c.name === "trust: acme-jira")!.result).toMatchObject({
+      ok: false,
+      detail: expect.stringMatching(/cannot report who labeled or edited tickets, so drovr would launch nothing\. Set tickets.trustedActors to "any"/),
+    });
+    await new Watcher({ config: h.config, store: h.store, providers, dispatcher: h.dispatcher, trust: gate, log: h.log }).start({ once: true });
+    expect(h.store.list(h.config.workflow)).toHaveLength(0);
+
+    const off = harness({ tickets: { trustedActors: "any" } });
+    off.tickets.tickets.push(ticket(1));
+    const offGate = await TrustGate.create(off.config, withoutProvenance(off.tickets));
+    expect(offGate.policy.kind).toBe("off");
+    expect((await offGate.admit(ticket(1))).ok).toBe(true);
+  });
+
+  it("refuses tickets it could not read and reads them again on the next screen", async () => {
+    const tickets = new FakeTickets();
+    tickets.tickets.push(ticket(1, { updatedAt: "2026-11-26T10:00:00Z" }));
+    const gate = trustGate(configSchema.parse({}), tickets);
+    const read = tickets.provenance.read;
+    tickets.provenance.read = async () => {
+      throw new Error("rate limited");
+    };
+    const failed = await gate.screen(tickets.tickets);
+    expect(failed.readError).toBe("rate limited");
+    expect(failed.refused.map((r) => r.verdict.distrust.kind)).toEqual(["unreadable"]);
+
+    tickets.provenance.read = read;
+    expect((await gate.screen(tickets.tickets)).refused).toEqual([]);
+    expect(tickets.reads).toHaveLength(1);
+  });
+
+  it("re-reads cached provenance after 15 minutes even when updatedAt did not change", async () => {
+    let now = 0;
+    const tickets = new FakeTickets();
+    tickets.tickets.push(ticket(1, { labels: [] }));
+    tickets.label("uuid-1", "agent-ready", MALLORY);
+    const gate = trustGate(configSchema.parse({}), tickets, () => now);
+    await gate.screen(tickets.tickets);
+    now += 14 * 60_000;
+    await gate.screen(tickets.tickets);
+    expect(tickets.reads).toHaveLength(1);
+    now += 60_000;
+    const later = await gate.screen(tickets.tickets);
+    expect(tickets.reads).toHaveLength(2);
+    expect(later.refused[0]!.fresh).toBe(true);
+  });
+
+  it("admits a frozen copy of the ticket it judged", async () => {
+    const tickets = new FakeTickets();
+    tickets.tickets.push(ticket(1));
+    const admission = await trustGate(configSchema.parse({}), tickets).admit(ticket(1));
+    expect(admission.ok && admission.verdict.basis).toBe("agent-ready applied by you");
+    expect(admission.ok && Object.isFrozen(admission.ticket) && Object.isFrozen(admission.ticket.labels)).toBe(true);
   });
 });

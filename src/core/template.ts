@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import type { Config } from "../config/schema.js";
 import type { Ticket } from "../plugins/types.js";
+import type { AdmittedTicket } from "./trust.js";
 
 export type TemplateVars = Record<string, string | undefined>;
 
@@ -124,8 +125,11 @@ export interface RenderedPrompt {
   text: string;
 }
 
-/** Renders what drovr sends for a ticket. Pure, so `drovr prompt` previews exactly what a launch sends. */
-export function renderPrompt(config: Config, template: string, ticket: Ticket, context: PromptContext): RenderedPrompt {
+/**
+ * Renders what drovr sends for a ticket. Pure, so `drovr prompt` previews exactly what a launch sends.
+ * The title and description reach the agent verbatim, so only a ticket the trust gate admitted renders.
+ */
+export function renderPrompt(config: Config, template: string, ticket: AdmittedTicket, context: PromptContext): RenderedPrompt {
   const marker = PROMPT_MARKER(ticket.identifier);
   const vars: TemplateVars = {
     ...ticketVars(ticket),

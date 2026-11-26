@@ -5,12 +5,14 @@ import type { Dispatcher } from "./dispatcher.js";
 import { compareTickets, criteriaFromConfig, evaluateTicket, isCompleted } from "./eligibility.js";
 import type { Logger } from "./log.js";
 import { ACTIVE_STATES, type DispatchRecord, type Store } from "./store.js";
+import type { TrustGate } from "./trust.js";
 
 export interface WatcherDeps {
   config: Config;
   store: Store;
   providers: Providers;
   dispatcher: Dispatcher;
+  trust: TrustGate;
   log: Logger;
 }
 
@@ -112,7 +114,7 @@ export class Watcher {
    * Swaps in a reloaded configuration between operations, so a launch in progress finishes with the
    * one it started with. The poll and monitor loops restart on the new intervals and a poll runs at once.
    */
-  async reload(next: Pick<WatcherDeps, "config" | "providers" | "dispatcher">): Promise<void> {
+  async reload(next: Pick<WatcherDeps, "config" | "providers" | "dispatcher" | "trust">): Promise<void> {
     await this.serial(async () => {
       this.deps = { ...this.deps, ...next };
     });
@@ -197,7 +199,7 @@ export class Watcher {
 
   private async poll(): Promise<void> {
     if (this.paused || this.stopping) return;
-    const { config, store, providers, log } = this.deps;
+    const { config, store, providers, trust, log } = this.deps;
     this.phase = "polling";
     this.lastPollAt = Date.now();
     const criteria = criteriaFromConfig(config);
@@ -210,13 +212,21 @@ export class Watcher {
       return;
     }
 
-    const eligible: Ticket[] = [];
+    const matching: Ticket[] = [];
     for (const ticket of fetched) {
       const evaluation = evaluateTicket(ticket, criteria);
-      if (evaluation.eligible) eligible.push(ticket);
+      if (evaluation.eligible) matching.push(ticket);
       else log.log("skip", `${ticket.identifier} does not match: ${evaluation.reasons.join("; ")}`);
     }
-    log.log("poll", `${fetched.length} ticket(s) fetched (${providers.tickets.describeQuery(criteria)}), ${eligible.length} eligible`);
+    // An untrusted ticket is never claimed, so it launches once a trusted actor re-applies the label.
+    const screen = await trust.screen(matching.filter((t) => !store.get(this.workflow, t.id)));
+    if (screen.readError) log.log("warn", `could not read who labeled or edited tickets: ${screen.readError} — they are not launched this poll`);
+    for (const { ticket, verdict, fresh } of screen.refused) {
+      if (fresh) log.log("skip", `${ticket.identifier} not trusted: ${verdict.reason}`);
+    }
+    const eligible = matching.filter((t) => !screen.refusedIds.has(t.id));
+    const untrusted = trust.policy.kind === "off" ? "" : `, ${screen.refused.length} not trusted`;
+    log.log("poll", `${fetched.length} ticket(s) fetched (${providers.tickets.describeQuery(criteria)}), ${eligible.length} eligible${untrusted}`);
 
     if (!store.getMeta(this.workflow, BASELINE_KEY)) {
       store.setMeta(this.workflow, BASELINE_KEY, new Date().toISOString());
