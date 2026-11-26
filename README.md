@@ -42,6 +42,7 @@ $ drovr run --dry-run --once --label bug
 - [Commands](#commands)
 - [Configuration](#configuration)
 - [How it behaves](#how-it-behaves)
+- [Who can start an agent](#who-can-start-an-agent)
 - [GitHub Issues](#github-issues)
 - [Customising the prompt](#customising-the-prompt)
 - [Plugins](#plugins)
@@ -112,7 +113,7 @@ drovr works on the git repository you run it in. Unless the config lists `reposi
 | Command | |
 | --- | --- |
 | `drovr run [--dry-run] [--once] [-v] [flags]` | Watch (default command). `-v` also logs skipped tickets and why. |
-| `drovr check [flags]` | Check providers: binaries, Linear or GitHub auth, team and labels exist, Herdr session running, agent supported, repos valid. |
+| `drovr check [flags]` | Check providers: binaries, Linear or GitHub auth, team and labels exist, trusted actors exist, Herdr session running, agent supported, repos valid. |
 | `drovr config [flags]` | Print the resolved config. |
 | `drovr init [--global] [--yes] [--force]` | Set up a config interactively. See [Quick start](#quick-start). |
 | `drovr history [ticket] [-a] [--json]` | Open dispatches (`-a`: all), or one ticket's record and event log. |
@@ -154,6 +155,7 @@ Objects merge key by key. Arrays (labels, states, repositories, agent args) are 
 | `tickets.assignee` | `"any"` | `--assignee` | `any`, `none` (unassigned), `@me`, or a user. |
 | `tickets.project` | | `--project` | Linear project ID, slug, or name; for `github`, a milestone number or title. |
 | `tickets.startedState` | `"In Progress"` | `--started-state` (`none` disables) | State (name or type) a ticket is moved to once its agent has acknowledged the ticket. See [Moving the ticket](#moving-the-ticket). `null` disables it. |
+| `tickets.trustedActors` | `["@me"]` | | Who can start an agent: a ticket launches only if these people applied its labels and nobody else edited it since. `@me` is the user `gh` or `linear` is logged in as. Other entries are GitHub logins, or Linear emails or user IDs. `"any"` turns the check off. See [Who can start an agent](#who-can-start-an-agent). |
 | `tickets.options.workspace` | | | Linear workspace slug (for multiple Linear logins). |
 | `tickets.options.repo` | the repository's GitHub remote | | `github` only: `[HOST/]OWNER/REPO` whose issues are watched. Without it, `gh` uses the first repository's remote. |
 | `completion.stateTypes` | `["completed", "canceled"]` | | A dispatch completes when its ticket reaches one of these state types… |
@@ -193,7 +195,7 @@ Name and path templates use `{identifier}`, `{identifierLower}`, `{title}`, `{ti
 
 On every poll, drovr asks the ticket source for candidates with the team, state, label, assignee, and project filters. For Linear that is `linear issue list --json --limit all`, which follows pagination. For GitHub it is the issues API through `gh api`. drovr then re-checks each ticket locally (labels, excluded labels, state name or type, assignee). That local check is authoritative and produces the reasons drovr logs. Run with `-v` to also see skipped tickets and why they were skipped.
 
-A ticket is **newly eligible** if it matches and has no dispatch record in the workflow. An old ticket that gets the label or state later becomes eligible on the next poll. Eligible tickets launch in priority order (urgent first), then oldest first.
+A ticket is **newly eligible** if it matches, passes the [trust check](#who-can-start-an-agent), and has no dispatch record in the workflow. An old ticket that gets the label or state later becomes eligible on the next poll. Eligible tickets launch in priority order (urgent first), then oldest first.
 
 ### First run
 
@@ -261,6 +263,47 @@ Moving a ticket out of `tickets.states` (e.g. out of "Todo") does not affect its
 - **Atomic claims.** A ticket is claimed with an insert-if-absent before anything is created.
 - **Reconciliation.** Each step records its intent before acting, and on re-run first checks whether its effect already exists. An existing worktree is reused. A workspace whose create response was lost is found by label and cwd and adopted. An agent already in the pane is adopted and renamed. A prompt whose outcome is unknown is looked up in the agent's terminal output by its `[drovr:<ID>]` marker. If the prompt can't be confirmed, drovr asks you rather than risk sending it twice (`drovr retry <ID> --resend-prompt`). On startup the watcher resumes dispatches left in `launching` before polling.
 
+## Who can start an agent
+
+drovr copies a ticket's title and description into the agent's brief, and the agent runs on your machine with your credentials. So anyone who can make a ticket match could put instructions in front of your agent: a teammate or bot that applies the label, an issue template that applies it for any author, an integration that creates tickets, or someone who edits the ticket after you labeled it.
+
+By default, a ticket launches only if both of these are true:
+
+1. Each label in `tickets.labels` was last applied by a trusted actor. A label set when the ticket was created counts as applied by its creator. With no `tickets.labels`, the creator must be trusted.
+2. Nobody else changed the title or description since the latest of those labels was applied.
+
+The trusted actors are `tickets.trustedActors`, by default `["@me"]`: the user `gh` or `linear` is logged in as. To trust teammates too, list them:
+
+```json
+{ "tickets": { "trustedActors": ["@me", "octocat"] } }
+```
+
+For GitHub, use logins. For Linear, use emails or user IDs. drovr rejects display names, because anyone can change theirs. Bots, GitHub Apps, Linear automations and integrations, and deleted users are never trusted.
+
+What you see:
+
+- `drovr check` prints the rule with `@me` resolved. It fails if a trusted actor does not exist, or if the ticket source cannot report who labeled or edited tickets.
+
+  ```
+  ✓ trust: github — launches tickets whose agent-ready label was applied by yss14 (@me), with no title or description edits by anyone else since
+  ```
+
+- A ticket that fails the check is not claimed. With `-v`, drovr logs why, once each time the ticket changes. The `poll` line always counts these tickets.
+
+  ```
+  skip    GH-418 not trusted: agent-ready was applied by mallory, who is not in tickets.trustedActors — apply it yourself to launch it
+  ```
+
+  Apply the label yourself (remove it first if it is already there), and the ticket launches on the next poll.
+- The check runs again whenever a launch starts or resumes: a new launch, `drovr retry`, an interrupted launch after a restart, and a launch that continues after a startup dialog. drovr reads the ticket first and then who changed it, and the brief is written from that same copy. If someone else edited the ticket in between, the launch fails with the reason and nothing reaches the agent. Review the ticket, re-apply the label, then run `drovr retry <ID>`.
+- `drovr run --dry-run` reports `would be skipped: not trusted: …`, and `drovr prompt <ticket>` refuses to show the brief of a ticket that would not launch.
+
+To turn the check off, set `"trustedActors": "any"`. `drovr check` then warns that anyone who can apply the label can start an agent.
+
+The check covers the brief only. Comments are not in the brief, but an agent that reads the issue itself (for example with `gh issue view --comments`) sees them.
+
+Reading who labeled and edited a ticket costs one GitHub GraphQL point per 50 issues, or one Linear API request per 20 issues. drovr reads only tickets that have no dispatch record yet, and caches the result for each ticket until the ticket changes or 15 minutes pass.
+
 ## GitHub Issues
 
 With `"tickets": { "provider": "github" }`, drovr watches the issues of a GitHub repository through `gh`. Without `tickets.options.repo`, that is the repository `gh` finds from the first repository's remote, so a global config works across repositories.
@@ -305,7 +348,7 @@ The same works per run with `--prompt-file`, `--prompt-message`, and `--prompt-d
 
 Every external system sits behind a provider interface in [`src/plugins/types.ts`](src/plugins/types.ts):
 
-- `TicketSource`: list candidates, fetch details, optionally validate criteria (built in: `linear`, `github`)
+- `TicketSource`: list candidates, fetch details, optionally validate criteria and report who labeled and edited tickets (built in: `linear`, `github`)
 - `TerminalProvider`: workspaces, panes, agent start, prompt, read (built in: `herdr`)
 - `AgentProvider`: availability, launch spec per terminal, startup-dialog detection (built in: `codex`, `claude`)
 - `VcsProvider`: worktrees and their blocking setup hooks (built in: `git`, `worktrunk`)
@@ -346,6 +389,13 @@ export default (registry) =>
 ```
 
 `ctx.exec` runs commands and `ctx.log` writes to drovr's output. `tickets.options` (with `cwd`, the first repository's path, unless set) and `terminal.options` are passed to `create`.
+
+A ticket source without `provenance` launches nothing until `tickets.trustedActors` is `"any"`, and `drovr check` says so. To support the [trust check](#who-can-start-an-agent), add a `provenance` object with two methods:
+
+- `resolveActors(refs)` maps `"@me"` and each configured reference to `{ ref, actor: { id, name } }`, where `id` is the tracker's stable user ID. It rejects, naming the reference, when one does not exist.
+- `read(refs)` returns a `Map` from each ticket's `id` to its provenance: `created` (who created it and when), `labeled` (the latest application of each label, keyed by lowercased name), `edited` (every title or description change), and `completeSince` (the time from which `labeled` and `edited` are complete). Use a `null` actor for bots, automations, and deleted users. drovr calls `read` after it reads the ticket's content, so it must return what the tracker holds at the time of the call.
+
+drovr applies the rule itself. See `Provenance` in [`src/plugins/types.ts`](src/plugins/types.ts) for the exact shape.
 
 ## Development
 

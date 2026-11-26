@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- Trust check: a ticket launches only if each label in `tickets.labels` was last applied by someone in `tickets.trustedActors`, and nobody else changed its title or description since. drovr checks again at every launch, retry, and resumed launch, on the same copy of the ticket the brief is written from. `drovr check`, dry runs, `-v` logs, and `drovr prompt` show the result. See "Who can start an agent" in the README.
+- `tickets.trustedActors`: `"@me"`, GitHub logins, or Linear emails or user IDs. `"any"` turns the check off.
+- Ticket-source plugins can implement the optional `provenance` reader to support the trust check.
+
+### Changed
+
+- **Tickets labeled by other people no longer launch by default.** `tickets.trustedActors` defaults to `["@me"]`, the user `gh` or `linear` is logged in as. If teammates, bots, issue templates, automations, or integrations apply your trigger label, add those people to `tickets.trustedActors`, or set it to `"any"` to keep the old behavior. Bots and automations cannot be trusted by name. Ticket-source plugins without `provenance` launch nothing until you set `"any"`.
+
 ## [1.0.0] - 2026-11-02
 
 First release.
