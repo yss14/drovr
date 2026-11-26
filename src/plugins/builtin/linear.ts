@@ -1,5 +1,16 @@
 import { describeFailure, which } from "../../core/exec.js";
-import type { AvailabilityResult, ProviderContext, Ticket, TicketCriteria, TicketSource } from "../types.js";
+import {
+  type Actor,
+  actorId,
+  type Attribution,
+  type AvailabilityResult,
+  type ContentEdit,
+  type Provenance,
+  type ProviderContext,
+  type Ticket,
+  type TicketCriteria,
+  type TicketSource,
+} from "../types.js";
 
 interface LinearOptions {
   /** Linear workspace slug, for `--workspace`. Defaults to the CLI's default credential. */
@@ -26,6 +37,14 @@ const EXIT_HINTS: Record<number, string> = {
   5: "Linear unavailable or rate limited",
 };
 
+/** Issues per provenance query: each costs about 380 of Linear's 10,000 complexity points per query (measured). */
+const PROVENANCE_BATCH = 20;
+const PROVENANCE_FIELDS =
+  "createdAt creator { id name } labels { nodes { name } } " +
+  "history(first: 100) { pageInfo { hasNextPage } nodes { createdAt actor { id name } addedLabels { name } updatedDescription fromTitle toTitle } }";
+const EMAIL = /^[^\s@]+@[^\s@]+$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export function createLinearProvider(ctx: ProviderContext, options: LinearOptions = {}): TicketSource {
   const binary = options.binary ?? "linear";
   const globalArgs = ["--no-input", ...(options.workspace ? ["--workspace", options.workspace] : [])];
@@ -43,9 +62,56 @@ export function createLinearProvider(ctx: ProviderContext, options: LinearOption
     }
   }
 
+  async function resolveActor(ref: string): Promise<Actor> {
+    let user: Json | null | undefined;
+    if (ref === "@me") {
+      user = ((await json(["api", "query { viewer { id name } }"])) as { data?: { viewer?: Json } }).data?.viewer;
+    } else if (EMAIL.test(ref)) {
+      const query = "query($email: String!) { users(filter: { email: { eq: $email } }) { nodes { id name } } }";
+      user = ((await json(["api", query, "--variable", `email=${ref}`])) as { data?: { users?: { nodes?: Json[] } } }).data?.users?.nodes?.[0];
+    } else if (UUID.test(ref)) {
+      const query = "query($id: String!) { user(id: $id) { id name } }";
+      user = await json(["api", query, "--variable", `id=${ref}`]).then(
+        (response) => (response as { data?: { user?: Json } }).data?.user,
+        (error: unknown) => {
+          if (error instanceof LinearError && error.exitCode === 3) return undefined;
+          throw error;
+        },
+      );
+    } else {
+      throw new LinearError(`"${ref}" is not a Linear user email or ID (display names can change, so drovr does not trust them)`, null);
+    }
+    if (!user) throw new LinearError(`no Linear user "${ref}"`, null);
+    return { id: actorId(String(user.id)), name: String(user.name) };
+  }
+
   return {
     kind: "tickets",
     id: "linear",
+
+    provenance: {
+      async resolveActors(refs) {
+        const resolved = [];
+        for (const ref of refs) resolved.push({ ref, actor: await resolveActor(ref) });
+        return resolved;
+      },
+
+      async read(refs) {
+        const result = new Map<string, Provenance>();
+        for (let start = 0; start < refs.length; start += PROVENANCE_BATCH) {
+          const batch = refs.slice(start, start + PROVENANCE_BATCH);
+          const declared = batch.map((_, i) => `$i${i}: String!`).join(", ");
+          const query = `query(${declared}) { ${batch.map((_, i) => `i${i}: issue(id: $i${i}) { ${PROVENANCE_FIELDS} }`).join(" ")} }`;
+          const variables = batch.flatMap((ref, i) => ["--variable", `i${i}=${ref.identifier}`]);
+          const data = ((await json(["api", query, ...variables])) as { data?: Json | null }).data ?? {};
+          batch.forEach((ref, i) => {
+            const issue = data[`i${i}`] as Json | null | undefined;
+            if (issue) result.set(ref.id, toProvenance(issue));
+          });
+        }
+        return result;
+      },
+    },
 
     async checkAvailability(): Promise<AvailabilityResult> {
       if (!(await which(ctx.exec, binary))) return { ok: false, detail: `${binary} not found on PATH` };
@@ -132,6 +198,40 @@ export function createLinearProvider(ctx: ProviderContext, options: LinearOption
       return { ...ticket, state: { name: String(state.name ?? ticket.state.name), type: state.type } };
     },
   };
+}
+
+/** A null actor is an automation, integration, or API key (Linear names those in botActor). */
+function toActor(value: unknown): Actor | null {
+  const actor = value as Json | null | undefined;
+  return actor && typeof actor.id === "string" ? { id: actorId(actor.id), name: String(actor.name) } : null;
+}
+
+function toProvenance(issue: Json): Provenance {
+  const created: Attribution = { actor: toActor(issue.creator), at: Date.parse(String(issue.createdAt)) };
+  const history = (issue.history ?? {}) as { pageInfo?: { hasNextPage?: boolean }; nodes?: Json[] };
+  const entries = history.nodes ?? [];
+  const complete = !history.pageInfo?.hasNextPage;
+  const labeled = new Map<string, Attribution>();
+  const edited: ContentEdit[] = [];
+  for (const entry of entries) {
+    const by: Attribution = { actor: toActor(entry.actor), at: Date.parse(String(entry.createdAt)) };
+    for (const label of (entry.addedLabels as Json[] | null) ?? []) {
+      const name = String(label.name).toLowerCase();
+      if (by.at >= (labeled.get(name)?.at ?? -Infinity)) labeled.set(name, by);
+    }
+    if (entry.updatedDescription) edited.push({ ...by, field: "description" });
+    if (entry.fromTitle != null || entry.toTitle != null) edited.push({ ...by, field: "title" });
+  }
+  // Linear records no history entry for labels set at creation; only full history proves a label had no later add.
+  if (complete) {
+    const labels = ((issue.labels as Json | undefined)?.nodes as Json[] | undefined) ?? [];
+    for (const label of labels) {
+      const name = String(label.name).toLowerCase();
+      if (!labeled.has(name)) labeled.set(name, created);
+    }
+  }
+  const oldest = Math.min(...entries.map((e) => Date.parse(String(e.createdAt))));
+  return { created, labeled, edited, completeSince: complete ? created.at : oldest };
 }
 
 function toTicket(issue: Json): Ticket {

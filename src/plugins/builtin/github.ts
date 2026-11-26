@@ -1,5 +1,16 @@
 import { describeFailure, which } from "../../core/exec.js";
-import type { AvailabilityResult, ProviderContext, Ticket, TicketCriteria, TicketSource } from "../types.js";
+import {
+  type Actor,
+  actorId,
+  type Attribution,
+  type AvailabilityResult,
+  type ContentEdit,
+  type Provenance,
+  type ProviderContext,
+  type Ticket,
+  type TicketCriteria,
+  type TicketSource,
+} from "../types.js";
 
 interface GithubOptions {
   /** `[HOST/]OWNER/REPO`. Defaults to the repository gh finds in `cwd`. */
@@ -22,6 +33,18 @@ export class GithubError extends Error {
 const OPEN_STATES = new Set(["open", "unstarted"]);
 const CLOSED_STATES = new Set(["closed", "completed", "canceled"]);
 const ISSUES = "repos/{owner}/{repo}/issues";
+
+/** Issues per provenance query: 50 cost 1 point of the 5,000-point GraphQL budget (measured). */
+const PROVENANCE_BATCH = 50;
+const ACTOR = "__typename login ... on User { id }";
+// userContentEdits lists newest first and the timeline oldest first, so these windows both hold the newest 100.
+const PROVENANCE_FRAGMENT = `fragment provenance on Issue {
+  createdAt author { ${ACTOR} }
+  userContentEdits(first: 100) { totalCount nodes { editedAt editor { ${ACTOR} } } }
+  timelineItems(itemTypes: [LABELED_EVENT, RENAMED_TITLE_EVENT], last: 100) { totalCount nodes { __typename
+    ... on LabeledEvent { createdAt actor { ${ACTOR} } label { name } }
+    ... on RenamedTitleEvent { createdAt actor { ${ACTOR} } } } }
+}`;
 
 /** "GH-12", "#12", or "12" → 12. */
 export function issueNumber(ref: string): string {
@@ -56,6 +79,17 @@ export function createGithubProvider(ctx: ProviderContext, options: GithubOption
     } catch {
       throw new GithubError(`Expected JSON from gh ${args.slice(0, 3).join(" ")}, got: ${stdout.slice(0, 200)}`);
     }
+  }
+
+  /** A GraphQL query's data. gh exits 1 when part of a query failed (e.g. one deleted issue) but still prints the rest. */
+  async function graphql(query: string, fields: string[] = []): Promise<Json> {
+    const result = await ctx.exec(binary, ["api", "graphql", "-f", `query=${query}`, ...fields], { cwd: options.cwd, timeoutMs: 120_000, env });
+    let body: { data?: Json | null } | undefined;
+    try {
+      body = JSON.parse(result.stdout) as { data?: Json | null };
+    } catch {}
+    if (!body?.data) throw new GithubError(describeFailure(result));
+    return body.data;
   }
 
   /** Every item of a REST list endpoint, following pagination to the end. */
@@ -173,7 +207,71 @@ export function createGithubProvider(ctx: ProviderContext, options: GithubOption
       }
       return { ok: true, detail: `labels launched issues "${label}"` };
     },
+
+    provenance: {
+      async resolveActors(refs) {
+        const logins = [...new Set(refs.filter((ref) => ref !== "@me"))];
+        const declared = logins.map((_, i) => `$u${i}: String!`).join(", ");
+        const users = logins.map((_, i) => `u${i}: user(login: $u${i}) { id login }`).join(" ");
+        const data = await graphql(`query${declared ? `(${declared})` : ""} { viewer { id login } ${users} }`, logins.flatMap((login, i) => ["-f", `u${i}=${login}`]));
+        return refs.map((ref) => {
+          const user = (ref === "@me" ? data.viewer : data[`u${logins.indexOf(ref)}`]) as Json | null | undefined;
+          if (!user) throw new GithubError(`no GitHub user "${ref}"`);
+          return { ref, actor: { id: actorId(String(user.id)), name: String(user.login) } };
+        });
+      },
+
+      async read(refs) {
+        const result = new Map<string, Provenance>();
+        for (let start = 0; start < refs.length; start += PROVENANCE_BATCH) {
+          const batch = refs.slice(start, start + PROVENANCE_BATCH);
+          const issues = batch.map((ref, i) => `i${i}: issue(number: ${issueNumber(ref.identifier)}) { ...provenance }`).join("\n");
+          const query = `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {\n${issues}\n} }\n${PROVENANCE_FRAGMENT}`;
+          const repository = (await graphql(query, ["-F", "owner={owner}", "-F", "name={repo}"])).repository as Json | null;
+          if (!repository) throw new GithubError("the repository was not found");
+          batch.forEach((ref, i) => {
+            const issue = repository[`i${i}`] as Json | null | undefined;
+            if (issue) result.set(ref.id, toProvenance(issue));
+          });
+        }
+        return result;
+      },
+    },
   };
+}
+
+/** Bots and apps cannot be named in tickets.trustedActors, and a deleted user is null, so only users count. */
+function toActor(value: unknown): Actor | null {
+  const actor = value as Json | null | undefined;
+  return actor?.__typename === "User" && typeof actor.id === "string" ? { id: actorId(actor.id), name: String(actor.login) } : null;
+}
+
+/** One issue's `...provenance` fragment. */
+function toProvenance(issue: Json): Provenance {
+  const created: Attribution = { actor: toActor(issue.author), at: Date.parse(String(issue.createdAt)) };
+  const labeled = new Map<string, Attribution>();
+  const edited: ContentEdit[] = [];
+  const truncatedAt: number[] = [];
+  const window = (connection: unknown, at: (node: Json) => number): Json[] => {
+    const { totalCount, nodes } = (connection ?? {}) as { totalCount?: number; nodes?: Json[] };
+    const items = nodes ?? [];
+    if ((totalCount ?? 0) > items.length) truncatedAt.push(Math.min(...items.map(at)));
+    return items;
+  };
+
+  for (const event of window(issue.timelineItems, (e) => Date.parse(String(e.createdAt)))) {
+    const by: Attribution = { actor: toActor(event.actor), at: Date.parse(String(event.createdAt)) };
+    if (event.__typename === "RenamedTitleEvent") edited.push({ ...by, field: "title" });
+    if (event.__typename !== "LabeledEvent") continue;
+    const name = String((event.label as Json | null)?.name ?? "").toLowerCase();
+    if (by.at >= (labeled.get(name)?.at ?? -Infinity)) labeled.set(name, by);
+  }
+  // The oldest entry is the original body, dated at creation, by the author.
+  for (const edit of window(issue.userContentEdits, (e) => Date.parse(String(e.editedAt)))) {
+    edited.push({ actor: toActor(edit.editor), at: Date.parse(String(edit.editedAt)), field: "description" });
+  }
+  // Each truncated list is complete only from its oldest entry on, so all are complete from the newest of those.
+  return { created, labeled, edited, completeSince: truncatedAt.length > 0 ? Math.max(...truncatedAt) : created.at };
 }
 
 /** A REST issue (`repos/{owner}/{repo}/issues`) as a ticket. */
